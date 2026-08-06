@@ -1,0 +1,32 @@
+[package]
+name = "egui_tty"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "A terminal emulator widget for egui, drawn on top of Ghostty's VT engine"
+authors = ["Antoine M-P"]
+license = "MIT"
+repository = "https://github.com/antoineMoPa/egui_tty"
+documentation = "https://docs.rs/egui_tty"
+readme = "README.md"
+keywords = ["egui", "terminal", "tty", "ghostty", "vt"]
+categories = ["gui", "command-line-interface"]
+exclude = [".github/"]
+
+# Published on its own: the crate is a widget, not part of whatever binary vendors it.
+[workspace]
+
+[dependencies]
+egui = "0.36"
+libghostty-vt = "0.2.1"
+
+[dev-dependencies]
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+portable-pty = "0.9"
+anyhow = "1"
+
+[[example]]
+name = "shell"
+
+[lints.rust]
+missing_docs = "warn"
