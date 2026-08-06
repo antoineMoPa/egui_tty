@@ -186,6 +186,79 @@ mod tests {
         assert_eq!(&*recorder.written.lock().unwrap(), b"ls\r");
     }
 
+    /// One frame of the widget with a chord held, which is the whole path a keystroke takes:
+    /// egui's event, the physical key it stands for, and the bytes the program is written.
+    fn typed(terminal: &mut Terminal, key: egui::Key, modifiers: egui::Modifiers) {
+        let ctx = egui::Context::default();
+        // Keystrokes only reach a focused widget, and focus is taken on the frame after it is
+        // asked for — so the chord goes in on the second one.
+        terminal.request_focus();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            terminal.ui(ui, &TerminalStyle::from_visuals(ui.visuals()));
+        })
+        .drop_without_applying_deltas();
+
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: Some(key),
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }],
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ui| {
+            terminal.ui(ui, &TerminalStyle::from_visuals(ui.visuals()));
+        })
+        .drop_without_applying_deltas();
+    }
+
+    /// ⌃← reaching a shell as `ESC [ 1 ; 5 D` is what typed a stray `;5D` into the prompt:
+    /// readline binds `ESC b` and none of the other.
+    #[test]
+    fn a_shell_is_sent_the_word_motion_it_binds() {
+        let (mut terminal, _writer, recorder) = terminal();
+
+        typed(
+            &mut terminal,
+            egui::Key::ArrowLeft,
+            egui::Modifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(&*recorder.written.lock().unwrap(), b"\x1bb");
+    }
+
+    /// And a program reading chords for itself is sent the real one.
+    #[test]
+    fn a_program_on_the_kitty_protocol_is_sent_the_chord() {
+        let (mut terminal, writer, recorder) = terminal();
+        writer
+            .send(b"\x1b[>1u".to_vec())
+            .expect("expected the terminal to be listening");
+        terminal.poll();
+
+        typed(
+            &mut terminal,
+            egui::Key::ArrowLeft,
+            egui::Modifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+        );
+
+        let written = recorder.written.lock().unwrap().clone();
+        assert_ne!(written, b"\x1bb", "the chord should not have been rewritten");
+        assert!(
+            String::from_utf8_lossy(&written).contains("[1;5"),
+            "expected the chord itself, got {:?}",
+            String::from_utf8_lossy(&written)
+        );
+    }
+
     #[test]
     fn a_closed_output_channel_means_the_program_has_gone() {
         let (mut terminal, writer, _) = terminal();

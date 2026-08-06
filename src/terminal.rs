@@ -37,6 +37,36 @@ const BLINK_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const MIN_COLS: u16 = 20;
 const MIN_ROWS: u16 = 4;
 
+/// The line editing chords a shell is sent, in place of the encoding a terminal would
+/// otherwise give them.
+///
+/// ⌃← is `ESC [ 1 ; 5 D` in every terminal, and readline binds none of it: it takes the
+/// `ESC [ 1` and types the rest, which is where a stray `;5D` in the prompt comes from. What
+/// readline does bind is `ESC b`, so that is what it is sent — and the same for the rest of
+/// the chords a line is edited with. A program that asked for the Kitty keyboard protocol
+/// reads the chord itself and gets the real thing instead; see [`Terminal::reads_the_real_chord`].
+const LEGACY_EDITING_CHORDS: &[(key::Key, key::Mods, &[u8])] = &[
+    // Word left and right, and the word behind the cursor.
+    (key::Key::ArrowLeft, key::Mods::CTRL, b"\x1bb"),
+    (key::Key::ArrowRight, key::Mods::CTRL, b"\x1bf"),
+    (key::Key::Backspace, key::Mods::CTRL, b"\x17"),
+    // The ends of the line, and the whole of it.
+    (key::Key::ArrowLeft, key::Mods::SUPER, b"\x01"),
+    (key::Key::ArrowRight, key::Mods::SUPER, b"\x05"),
+    (key::Key::Backspace, key::Mods::SUPER, b"\x15"),
+];
+
+/// What a shell is sent for one of the editing chords, if this is one of them.
+///
+/// The modifiers have to match exactly: ⌃⇧← is a selection in whatever is reading it, not a
+/// word motion someone held an extra key for.
+fn legacy_editing_chord(key: key::Key, mods: key::Mods) -> Option<&'static [u8]> {
+    LEGACY_EDITING_CHORDS
+        .iter()
+        .find(|(chord, with, _)| *chord == key && *with == mods)
+        .map(|(_, _, bytes)| *bytes)
+}
+
 /// A terminal: an emulator, the program attached to it, and the grid both end up drawn as.
 ///
 /// Bytes the program writes are read from the [`TtyStream`] it was built with, on whichever
@@ -592,6 +622,12 @@ impl Terminal {
             }
 
             let mods = keys::vt_mods(*modifiers);
+            if !self.reads_the_real_chord()
+                && let Some(bytes) = legacy_editing_chord(vt, mods)
+            {
+                encoded.extend_from_slice(bytes);
+                continue;
+            }
             // A control or command combo is a command, not text: the platform's character
             // for it (or lack of one) must not override libghostty's encoding.
             let text = if mods.intersects(key::Mods::CTRL | key::Mods::SUPER) {
@@ -615,6 +651,14 @@ impl Terminal {
         if !encoded.is_empty() {
             report(self.tty.write(&encoded));
         }
+    }
+
+    /// Whether the running program asked for the Kitty keyboard protocol, and so reads the
+    /// chord itself rather than an escape someone once chose to stand for it.
+    fn reads_the_real_chord(&self) -> bool {
+        self.emulator
+            .kitty_keyboard_flags()
+            .is_ok_and(|flags| !flags.is_empty())
     }
 
     fn encode_key(
@@ -996,6 +1040,65 @@ mod tests {
             .encode_key(key, mods, text.map(str::to_string), false, &mut out)
             .expect("expected the keystroke to encode");
         out
+    }
+
+    /// The `;5D` bug: readline binds none of `ESC [ 1 ; 5 D`, so ⌃← used to type the tail of
+    /// it into the prompt. What a shell is sent is the escape it already means by it.
+    #[test]
+    fn the_editing_chords_are_sent_as_what_a_shell_binds() {
+        assert_eq!(
+            legacy_editing_chord(key::Key::ArrowLeft, key::Mods::CTRL),
+            Some(b"\x1bb".as_slice())
+        );
+        assert_eq!(
+            legacy_editing_chord(key::Key::ArrowRight, key::Mods::CTRL),
+            Some(b"\x1bf".as_slice())
+        );
+        assert_eq!(
+            legacy_editing_chord(key::Key::ArrowLeft, key::Mods::SUPER),
+            Some(b"\x01".as_slice())
+        );
+    }
+
+    /// Only those chords, and only on their own: everything else is left to the encoder, which
+    /// is what knows about application cursor keys and the rest.
+    #[test]
+    fn every_other_key_is_left_to_the_encoder() {
+        assert_eq!(legacy_editing_chord(key::Key::ArrowLeft, key::Mods::empty()), None);
+        assert_eq!(legacy_editing_chord(key::Key::ArrowUp, key::Mods::CTRL), None);
+        assert_eq!(legacy_editing_chord(key::Key::A, key::Mods::CTRL), None);
+        // Shift held as well is a selection in whatever reads it, not a word motion.
+        assert_eq!(
+            legacy_editing_chord(key::Key::ArrowLeft, key::Mods::CTRL | key::Mods::SHIFT),
+            None
+        );
+    }
+
+    /// And a program that asked to read chords itself gets the real one — which is why ⌃←
+    /// already worked in claude while a shell was typing `;5D`.
+    #[test]
+    fn a_program_that_asked_for_the_kitty_protocol_reads_the_chord_itself() {
+        let (writer, output) = mpsc::channel();
+        let mut terminal = Terminal::new(TtyStream {
+            output,
+            tty: Arc::new(Recorder::default()) as Arc<dyn Tty>,
+        })
+        .expect("expected a terminal");
+
+        assert!(
+            !terminal.reads_the_real_chord(),
+            "a shell asks for nothing, and is sent what it binds"
+        );
+
+        writer
+            .send(b"\x1b[>1u".to_vec())
+            .expect("expected a listener");
+        terminal.poll();
+
+        assert!(
+            terminal.reads_the_real_chord(),
+            "a program that turned the protocol on should be sent the chord"
+        );
     }
 
     #[test]
