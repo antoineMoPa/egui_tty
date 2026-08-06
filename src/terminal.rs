@@ -348,7 +348,13 @@ impl Terminal {
         report(self.resize(cols, rows, cell));
 
         let (response, painter) = ui.allocate_painter(available, Sense::click_and_drag());
-        if response.clicked() || std::mem::take(&mut self.pending_focus) {
+        // A drag as well as a click: selecting text is a drag, and a pointer that never
+        // clicked would leave the terminal without the keyboard — so the copy that a selection
+        // is made for would go to whatever had it instead.
+        if response.clicked()
+            || response.drag_started()
+            || std::mem::take(&mut self.pending_focus)
+        {
             response.request_focus();
         }
         let focused = response.has_focus();
@@ -624,11 +630,18 @@ impl Terminal {
         event.set_action(if repeat { Action::Repeat } else { Action::Press });
         event.set_key(vt);
         event.set_mods(mods);
+        let unshifted = keys::unshifted_codepoint(vt);
+        if let Some(codepoint) = unshifted {
+            event.set_unshifted_codepoint(codepoint);
+        }
+        // Shift that went into making the character is not a modifier the program should be
+        // told about — it is already in the text. Saying so is what the Kitty keyboard
+        // protocol needs to send `?` rather than the `/` key with shift held.
+        if keys::shift_was_consumed(mods, unshifted, text.as_deref()) {
+            event.set_consumed_mods(key::Mods::SHIFT);
+        }
         if let Some(text) = text {
             event.set_utf8(Some(text));
-        }
-        if let Some(codepoint) = keys::unshifted_codepoint(vt) {
-            event.set_unshifted_codepoint(codepoint);
         }
 
         self.encoder
@@ -929,4 +942,128 @@ fn color_of(rgb: RgbColor) -> Color32 {
 pub fn cell_size(painter: &egui::Painter, font: &FontId) -> egui::Vec2 {
     let galley = painter.layout_no_wrap("M".to_string(), font.clone(), Color32::WHITE);
     vec2(galley.size().x.max(1.0), galley.size().y.max(1.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Mutex, mpsc};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<u8>>);
+
+    impl Tty for Recorder {
+        fn write(&self, bytes: &[u8]) -> Result<()> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(())
+        }
+
+        fn resize(&self, _cols: u16, _rows: u16) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// What one keystroke sends to the program: the physical key, the modifiers, and the text
+    /// the platform produced for it, which is exactly what `handle_input` pairs up.
+    fn encoded(key: key::Key, mods: key::Mods, text: Option<&str>) -> Vec<u8> {
+        encoded_with(key, mods, text, b"")
+    }
+
+    /// The same, after the program has asked for something — the Kitty keyboard protocol,
+    /// say, which is a different encoding entirely.
+    fn encoded_with(
+        key: key::Key,
+        mods: key::Mods,
+        text: Option<&str>,
+        asked_for: &[u8],
+    ) -> Vec<u8> {
+        let (writer, output) = mpsc::channel();
+        let mut terminal = Terminal::new(TtyStream {
+            output,
+            tty: Arc::new(Recorder::default()) as Arc<dyn Tty>,
+        })
+        .expect("expected a terminal");
+        if !asked_for.is_empty() {
+            writer.send(asked_for.to_vec()).expect("expected a listener");
+            terminal.poll();
+        }
+        drop(writer);
+
+        terminal.encoder.set_options_from_terminal(&terminal.emulator);
+        let mut out = Vec::new();
+        terminal
+            .encode_key(key, mods, text.map(str::to_string), false, &mut out)
+            .expect("expected the keystroke to encode");
+        out
+    }
+
+    #[test]
+    fn a_plain_letter_is_sent_as_itself() {
+        assert_eq!(encoded(key::Key::A, key::Mods::empty(), Some("a")), b"a");
+    }
+
+    #[test]
+    fn a_shifted_letter_is_sent_as_the_capital() {
+        assert_eq!(encoded(key::Key::A, key::Mods::SHIFT, Some("A")), b"A");
+    }
+
+    /// Shift and the slash key is a question mark, and a program that reads `/` instead of `?`
+    /// puts the user in a menu they did not ask for.
+    #[test]
+    fn shifted_punctuation_is_sent_as_the_character_it_types() {
+        assert_eq!(encoded(key::Key::Slash, key::Mods::SHIFT, Some("?")), b"?");
+    }
+
+    /// What claude and friends turn on. The protocol reports the key that was pressed rather
+    /// than the character it typed, so a key whose character came out of shift has to say so —
+    /// otherwise `?` arrives as "the `/` key, with shift", and a program reads `/`.
+    #[test]
+    fn the_kitty_protocol_still_sends_the_character_that_was_typed() {
+        let bytes = encoded_with(key::Key::Slash, key::Mods::SHIFT, Some("?"), b"\x1b[>1u");
+
+        assert_eq!(
+            String::from_utf8_lossy(&bytes),
+            "?",
+            "a question mark should reach the program as a question mark"
+        );
+    }
+
+    /// Every character that only exists with shift held goes the same way as `?`: the digits
+    /// row is where most of them live.
+    #[test]
+    fn the_shifted_characters_of_the_number_row_survive_the_kitty_protocol() {
+        for (key, unshifted, typed) in [
+            (key::Key::Digit9, '9', "("),
+            (key::Key::Digit0, '0', ")"),
+            (key::Key::Digit1, '1', "!"),
+            (key::Key::Digit8, '8', "*"),
+            (key::Key::Minus, '-', "_"),
+            (key::Key::Equal, '=', "+"),
+        ] {
+            let _ = unshifted;
+            let bytes = encoded_with(key, key::Mods::SHIFT, Some(typed), b"\x1b[>1u");
+
+            assert_eq!(
+                String::from_utf8_lossy(&bytes),
+                typed,
+                "{typed} should reach the program as itself"
+            );
+        }
+    }
+
+    /// The same protocol still has to report shift when it did not make the character, or a
+    /// program loses shift-tab and friends.
+    #[test]
+    fn the_kitty_protocol_still_reports_shift_when_it_typed_nothing() {
+        let bytes = encoded_with(key::Key::Tab, key::Mods::SHIFT, None, b"\x1b[>1u");
+
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        assert!(text.contains(";2"), "shift should still be reported: {text:?}");
+    }
+
+    #[test]
+    fn a_control_combo_is_a_command_rather_than_text() {
+        assert_eq!(encoded(key::Key::C, key::Mods::CTRL, None), b"\x03");
+    }
 }

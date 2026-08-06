@@ -138,6 +138,32 @@ pub(crate) fn vt_mods(modifiers: egui::Modifiers) -> Mods {
     mods
 }
 
+/// Whether shift was spent producing the character the platform typed, rather than being a
+/// modifier the program is meant to see.
+///
+/// `?` is shift and the `/` key. A program told "the `/` key, with shift" has to work the
+/// character out for itself, and one speaking the Kitty keyboard protocol reasonably does not
+/// — it reads the key. Marking shift as consumed says the character in hand is the answer.
+pub(crate) fn shift_was_consumed(
+    mods: Mods,
+    unshifted: Option<char>,
+    text: Option<&str>,
+) -> bool {
+    if !mods.contains(Mods::SHIFT) {
+        return false;
+    }
+    let Some(text) = text else {
+        return false;
+    };
+    // Exactly one character, and a different one: anything else is a key that shift changed
+    // in some way the text does not capture, or no change at all.
+    let mut characters = text.chars();
+    let (Some(typed), None) = (characters.next(), characters.next()) else {
+        return false;
+    };
+    Some(typed) != unshifted
+}
+
 /// The unshifted character on a physical key, which the Kitty protocol reports alongside
 /// the key itself.
 pub(crate) fn unshifted_codepoint(key: VtKey) -> Option<char> {
@@ -220,6 +246,23 @@ mod tests {
     fn letters_map_to_their_physical_key() {
         assert_eq!(vt_key(UiKey::C), Some(VtKey::C));
         assert_eq!(unshifted_codepoint(VtKey::C), Some('c'));
+    }
+
+    #[test]
+    fn shift_that_made_the_character_is_consumed_by_it() {
+        // `?` is shift and the `/` key, and the character is the whole of what shift did.
+        assert!(shift_was_consumed(Mods::SHIFT, Some('/'), Some("?")));
+        assert!(shift_was_consumed(Mods::SHIFT, Some('a'), Some("A")));
+    }
+
+    #[test]
+    fn shift_that_changed_nothing_is_still_the_programs_to_see() {
+        // Tab types nothing, so shift-tab is a chord rather than a character.
+        assert!(!shift_was_consumed(Mods::SHIFT, None, None));
+        // A key whose character is the same either way did not spend shift on it.
+        assert!(!shift_was_consumed(Mods::SHIFT, Some('/'), Some("/")));
+        // And without shift there is nothing to consume.
+        assert!(!shift_was_consumed(Mods::empty(), Some('/'), Some("?")));
     }
 
     #[test]
