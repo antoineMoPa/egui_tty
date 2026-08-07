@@ -84,9 +84,16 @@ use std::sync::{Arc, mpsc};
 /// Implementations are usually a pty ([`portable-pty`](https://crates.io/crates/portable-pty)
 /// is the easy way) or a connection to a shell running on another machine.
 pub trait Tty: Send + Sync {
-    /// Send bytes the terminal has encoded — keystrokes, pastes, replies to the program's own
-    /// queries — to the program.
+    /// Send bytes the terminal has encoded — keystrokes, pastes — to the program.
     fn write(&self, bytes: &[u8]) -> Result<()>;
+
+    /// Answer a query the program made of the terminal: what it is, where the cursor is, what
+    /// colours it draws in. The program asked for these and nobody typed them, so a handle
+    /// that cares which is which - one waiting to see whether a person has started typing -
+    /// can tell them apart. By default they go the same way keystrokes do.
+    fn reply(&self, bytes: &[u8]) -> Result<()> {
+        self.write(bytes)
+    }
 
     /// Tell the program its window changed size, so its foreground process gets `SIGWINCH`.
     fn resize(&self, cols: u16, rows: u16) -> Result<()>;

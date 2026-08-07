@@ -137,7 +137,7 @@ impl Terminal {
         let reply_to = Arc::clone(&tty);
         emulator
             .on_pty_write(move |_emulator, data| {
-                let _ = reply_to.write(data);
+                let _ = reply_to.reply(data);
             })
             .map_err(|error| Error::context("failed to install the terminal reply hook", error))?;
 
