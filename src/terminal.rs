@@ -100,6 +100,9 @@ pub struct Terminal {
     pending_focus: bool,
     /// Cursor blink phase, in seconds since the widget was first drawn.
     blink_clock: f32,
+    /// How much of a line the wheel has asked for and not yet been given. A terminal scrolls
+    /// in whole lines and a trackpad scrolls in pixels, so this is what is left over.
+    scroll_remainder: f32,
     /// Ghostty's pointer-to-selection state machine, driven by this widget's mouse events.
     pointer: selection::Pointer,
     /// The URL under the pointer, found afresh each frame it moves. Held so the row it is on
@@ -160,6 +163,7 @@ impl Terminal {
             exited: false,
             pending_focus: false,
             blink_clock: 0.0,
+            scroll_remainder: 0.0,
             pointer: selection::Pointer::new()?,
             hovered_link: None,
             colored_for: None,
@@ -569,13 +573,22 @@ impl Terminal {
             return;
         }
         let scroll = ui.input(|input| input.smooth_scroll_delta.y);
-        if scroll.abs() < 0.5 {
+        if scroll == 0.0 || cell_size.y <= 0.0 {
             return;
         }
-        // Wheel notches are lines, and up on a wheel means back into the scrollback.
-        let lines = (scroll / cell_size.y).round() as isize;
-        if lines != 0 {
-            self.emulator.scroll_viewport(ScrollViewport::Delta(-lines));
+
+        // A terminal scrolls in whole lines, and a trackpad scrolls in pixels — most of its
+        // frames worth a fraction of one. Rounding each frame on its own threw those away, so
+        // a gesture made of them moved nothing at all however far it went; what is left over
+        // is kept instead, and the next frame adds to it until it is worth a line.
+        self.scroll_remainder += scroll / cell_size.y;
+        let lines = self.scroll_remainder.trunc();
+        self.scroll_remainder -= lines;
+
+        // Up on a wheel means back into the scrollback.
+        if lines != 0.0 {
+            self.emulator
+                .scroll_viewport(ScrollViewport::Delta(-(lines as isize)));
         }
     }
 

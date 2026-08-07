@@ -277,6 +277,97 @@ mod tests {
         assert!(terminal.has_exited());
     }
 
+    /// A terminal small enough to have a scrollback, filled with numbered lines, and the
+    /// widget frame that scrolls it: the pointer has to be over it for the wheel to count.
+    fn scrollable() -> (Terminal, egui::Context, mpsc::Sender<Vec<u8>>) {
+        let (mut terminal, writer, _) = terminal();
+        let mut output = String::new();
+        for index in 0..80 {
+            output.push_str(&format!("line {index}\r\n"));
+        }
+        writer
+            .send(output.into_bytes())
+            .expect("expected the terminal to be listening");
+        terminal.poll();
+        (terminal, egui::Context::default(), writer)
+    }
+
+    fn wheeled(terminal: &mut Terminal, ctx: &egui::Context, points: f32) {
+        let input = egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(egui::pos2(80.0, 80.0)),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, points),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: Default::default(),
+                },
+            ],
+            // Small enough that 80 lines do not all fit, so there is something to scroll to.
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 160.0),
+            )),
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ui| {
+            terminal.ui(ui, &TerminalStyle::from_visuals(ui.visuals()));
+        })
+        .drop_without_applying_deltas();
+    }
+
+    fn top_line(terminal: &mut Terminal) -> String {
+        terminal
+            .visible_text()
+            .expect("expected the screen")
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim_end()
+            .to_string()
+    }
+
+    /// A trackpad scrolls in pixels, and a frame of one is worth a fraction of a line. Each
+    /// frame rounded on its own rounded to nothing, so a gesture made of them scrolled a
+    /// terminal not at all — which on a laptop is every gesture there is.
+    #[test]
+    fn a_gesture_of_sub_line_steps_scrolls_as_far_as_it_asks_for() {
+        let (mut terminal, ctx, _writer) = scrollable();
+        wheeled(&mut terminal, &ctx, 0.0);
+        let before = top_line(&mut terminal);
+
+        // Twenty frames worth a quarter-line each: five lines asked for, in steps none of
+        // which is a line on its own.
+        for _ in 0..20 {
+            wheeled(&mut terminal, &ctx, 4.0);
+        }
+
+        assert_ne!(
+            top_line(&mut terminal),
+            before,
+            "a trackpad gesture should scroll the terminal"
+        );
+    }
+
+    /// What is scrolled to stays put when the program writes more, which is the whole point
+    /// of scrolling back while something is still working.
+    #[test]
+    fn output_arriving_does_not_yank_the_view_back_to_the_bottom() {
+        let (mut terminal, ctx, writer) = scrollable();
+        wheeled(&mut terminal, &ctx, 0.0);
+        for _ in 0..20 {
+            wheeled(&mut terminal, &ctx, 4.0);
+        }
+        let scrolled_to = top_line(&mut terminal);
+
+        writer
+            .send(b"more output\r\n".to_vec())
+            .expect("expected the terminal to be listening");
+        terminal.poll();
+
+        assert_eq!(top_line(&mut terminal), scrolled_to);
+    }
+
     #[test]
     fn searching_finds_matches_in_the_scrollback() {
         let (mut terminal, writer, _) = terminal();
