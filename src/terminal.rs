@@ -13,9 +13,11 @@ use egui::{
 use libghostty_vt::{
     Terminal as Emulator, TerminalOptions,
     key::{self, Action},
+    mouse,
     render::{CellIterator, CursorVisualStyle, Dirty, RenderState, RowIterator},
+    screen::Screen,
     style::RgbColor,
-    terminal::ScrollViewport,
+    terminal::{Mode, ScrollViewport},
 };
 
 use crate::{
@@ -105,6 +107,14 @@ pub struct Terminal {
     scroll_remainder: f32,
     /// Ghostty's pointer-to-selection state machine, driven by this widget's mouse events.
     pointer: selection::Pointer,
+    /// Encodes pointer events for a program that asked for mouse reporting, in whichever
+    /// protocol it asked for.
+    mouse_encoder: mouse::Encoder<'static>,
+    /// The one mouse event, reused for every encode.
+    mouse_event: mouse::Event<'static>,
+    /// The button a forwarded press put down and its release will lift, so the motion in
+    /// between is reported as a drag of that button.
+    mouse_button_down: Option<mouse::Button>,
     /// The URL under the pointer, found afresh each frame it moves. Held so the row it is on
     /// can be drawn underlined without looking it up a second time.
     hovered_link: Option<links::Link>,
@@ -165,6 +175,11 @@ impl Terminal {
             blink_clock: 0.0,
             scroll_remainder: 0.0,
             pointer: selection::Pointer::new()?,
+            mouse_encoder: mouse::Encoder::new()
+                .map_err(|error| Error::context("failed to create a mouse encoder", error))?,
+            mouse_event: mouse::Event::new()
+                .map_err(|error| Error::context("failed to create a mouse event", error))?,
+            mouse_button_down: None,
             hovered_link: None,
             colored_for: None,
             emulator_colors: None,
@@ -413,9 +428,8 @@ impl Terminal {
             // answered by every other terminal open beside it.
             self.handle_clipboard(ui);
         }
-        self.handle_scroll(ui, &response, cell);
-
         let origin = response.rect.min + vec2(padding, padding);
+        self.handle_scroll(ui, &response, origin, cell);
         self.handle_pointer(ui, &response, origin, cell);
 
         self.blink_clock += ui.input(|input| input.stable_dt).min(0.1);
@@ -479,6 +493,16 @@ impl Terminal {
         origin: egui::Pos2,
         cell_size: egui::Vec2,
     ) {
+        // A program that asked for mouse reporting reads clicks itself — claude and
+        // opencode move their cursor with them — so the pointer belongs to it, not to a
+        // selection. Shift held keeps the selection, the escape every terminal offers.
+        if self.reports_mouse() && !ui.input(|input| input.modifiers.shift) {
+            self.hovered_link = None;
+            self.forward_mouse(ui, response, origin, cell_size);
+            return;
+        }
+        self.mouse_button_down = None;
+
         let (pointer_at, pressed, released, now) = ui.input(|input| {
             (
                 input.pointer.interact_pos(),
@@ -539,6 +563,108 @@ impl Terminal {
         }
     }
 
+    /// Whether the running program asked for mouse reporting, and so reads the pointer
+    /// itself rather than leaving it to the widget's selections.
+    fn reports_mouse(&self) -> bool {
+        self.emulator.is_mouse_tracking().unwrap_or(false)
+    }
+
+    /// Send this frame's pointer events to the program, encoded in whichever mouse
+    /// protocol it asked for. libghostty owns the encoding — which events the tracking
+    /// mode reports, and what SGR or X10 or the rest look like — so all that happens here
+    /// is turning egui's events into presses, releases and motion at a position.
+    fn forward_mouse(
+        &mut self,
+        ui: &Ui,
+        response: &Response,
+        origin: egui::Pos2,
+        cell_size: egui::Vec2,
+    ) {
+        self.configure_mouse_encoder(response, origin, cell_size);
+        let events = ui.input(|input| input.events.clone());
+        let mut encoded = Vec::new();
+
+        for event in &events {
+            let (action, button, modifiers, at) = match event {
+                egui::Event::PointerButton {
+                    pos,
+                    button,
+                    pressed,
+                    modifiers,
+                } => {
+                    // A press has to land on the grid; a release is reported wherever
+                    // the drag it ends took the pointer.
+                    if *pressed && !response.contains_pointer() {
+                        continue;
+                    }
+                    let button = mouse_button(*button);
+                    let action = if *pressed {
+                        self.mouse_button_down = Some(button);
+                        mouse::Action::Press
+                    } else {
+                        self.mouse_button_down = None;
+                        mouse::Action::Release
+                    };
+                    (action, Some(button), *modifiers, *pos)
+                }
+                egui::Event::PointerMoved(pos) => {
+                    if !response.contains_pointer() && self.mouse_button_down.is_none() {
+                        continue;
+                    }
+                    let modifiers = ui.input(|input| input.modifiers);
+                    (mouse::Action::Motion, self.mouse_button_down, modifiers, *pos)
+                }
+                _ => continue,
+            };
+
+            self.mouse_encoder
+                .set_any_button_pressed(self.mouse_button_down.is_some());
+            let at = response.rect.clamp(at) - response.rect.min;
+            self.mouse_event
+                .set_action(action)
+                .set_button(button)
+                .set_mods(keys::vt_mods(modifiers))
+                .set_position(mouse::Position {
+                    x: at.x * MOUSE_PIXEL_SCALE,
+                    y: at.y * MOUSE_PIXEL_SCALE,
+                });
+            report(
+                self.mouse_encoder
+                    .encode_to_vec(&self.mouse_event, &mut encoded)
+                    .map_err(|error| Error::context("failed to encode a mouse event", error)),
+            );
+        }
+
+        if !encoded.is_empty() {
+            report(self.tty.write(&encoded));
+        }
+    }
+
+    /// Point the mouse encoder at the program's current protocol and this frame's
+    /// geometry, which is how a position in points becomes a row and a column.
+    fn configure_mouse_encoder(
+        &mut self,
+        response: &Response,
+        origin: egui::Pos2,
+        cell_size: egui::Vec2,
+    ) {
+        let rect = response.rect;
+        let padding = ((origin.x - rect.min.x).max(0.0) * MOUSE_PIXEL_SCALE) as u32;
+        self.mouse_encoder
+            .set_options_from_terminal(&self.emulator)
+            .set_size(mouse::EncoderSize {
+                screen_width: (rect.width().max(0.0) * MOUSE_PIXEL_SCALE) as u32,
+                screen_height: (rect.height().max(0.0) * MOUSE_PIXEL_SCALE) as u32,
+                cell_width: (cell_size.x.max(1.0) * MOUSE_PIXEL_SCALE) as u32,
+                cell_height: (cell_size.y.max(1.0) * MOUSE_PIXEL_SCALE) as u32,
+                padding_top: padding,
+                padding_bottom: padding,
+                padding_right: padding,
+                padding_left: padding,
+            })
+            .set_track_last_cell(true);
+    }
+
     /// Copy takes whatever is selected, and paste goes to the program.
     ///
     /// The platform turns those chords into events of their own before egui ever sees a key,
@@ -568,7 +694,13 @@ impl Terminal {
         }
     }
 
-    fn handle_scroll(&mut self, ui: &Ui, response: &Response, cell_size: egui::Vec2) {
+    fn handle_scroll(
+        &mut self,
+        ui: &Ui,
+        response: &Response,
+        origin: egui::Pos2,
+        cell_size: egui::Vec2,
+    ) {
         if !response.hovered() {
             return;
         }
@@ -584,12 +716,99 @@ impl Terminal {
         self.scroll_remainder += scroll / cell_size.y;
         let lines = self.scroll_remainder.trunc();
         self.scroll_remainder -= lines;
+        let lines = lines as i32;
+        if lines == 0 {
+            return;
+        }
+
+        // The wheel belongs to a program that asked for it — as the button presses mouse
+        // reporting spells it, or as the arrow keys the alternate screen turns it into.
+        // Shift held keeps the wheel on the viewport, like the pointer.
+        if !ui.input(|input| input.modifiers.shift) {
+            if self.reports_mouse() {
+                self.forward_wheel(ui, response, origin, cell_size, lines);
+                return;
+            }
+            if self.wheel_is_arrow_keys() {
+                self.send_wheel_arrows(lines);
+                return;
+            }
+        }
 
         // Up on a wheel means back into the scrollback.
-        if lines != 0.0 {
-            self.emulator
-                .scroll_viewport(ScrollViewport::Delta(-(lines as isize)));
+        self.emulator
+            .scroll_viewport(ScrollViewport::Delta(-(lines as isize)));
+    }
+
+    /// Send the wheel to a program reading the mouse, as presses of the buttons a wheel
+    /// stands for: four is a notch up and five a notch down, one press per line.
+    fn forward_wheel(
+        &mut self,
+        ui: &Ui,
+        response: &Response,
+        origin: egui::Pos2,
+        cell_size: egui::Vec2,
+        lines: i32,
+    ) {
+        let Some(at) = ui.input(|input| input.pointer.hover_pos()) else {
+            return;
+        };
+        self.configure_mouse_encoder(response, origin, cell_size);
+        self.mouse_encoder
+            .set_any_button_pressed(self.mouse_button_down.is_some());
+
+        let button = if lines > 0 {
+            mouse::Button::Four
+        } else {
+            mouse::Button::Five
+        };
+        let modifiers = keys::vt_mods(ui.input(|input| input.modifiers));
+        let at = response.rect.clamp(at) - response.rect.min;
+
+        let mut encoded = Vec::new();
+        for _ in 0..lines.unsigned_abs() {
+            self.mouse_event
+                .set_action(mouse::Action::Press)
+                .set_button(Some(button))
+                .set_mods(modifiers)
+                .set_position(mouse::Position {
+                    x: at.x * MOUSE_PIXEL_SCALE,
+                    y: at.y * MOUSE_PIXEL_SCALE,
+                });
+            report(
+                self.mouse_encoder
+                    .encode_to_vec(&self.mouse_event, &mut encoded)
+                    .map_err(|error| Error::context("failed to encode a wheel event", error)),
+            );
         }
+        if !encoded.is_empty() {
+            report(self.tty.write(&encoded));
+        }
+    }
+
+    /// Whether the wheel belongs to the program rather than the scrollback: the alternate
+    /// screen has no scrollback, and a full-screen program that never asked for the mouse
+    /// still expects the wheel to move something — so terminals send arrow keys instead,
+    /// the "alternate scroll" mode the emulator keeps on by default the way Ghostty does.
+    fn wheel_is_arrow_keys(&self) -> bool {
+        self.emulator
+            .active_screen()
+            .is_ok_and(|screen| screen == Screen::Alternate)
+            && self.emulator.mode(Mode::ALT_SCROLL).unwrap_or(false)
+    }
+
+    /// A notch of the wheel as the arrow key it scrolls by, in the encoding the cursor key
+    /// mode picks — which is what a terminal on the alternate screen sends.
+    fn send_wheel_arrows(&mut self, lines: i32) {
+        let application = self.emulator.mode(Mode::DECCKM).unwrap_or(false);
+        let arrow: &[u8] = match (lines > 0, application) {
+            (true, true) => b"\x1bOA",
+            (true, false) => b"\x1b[A",
+            (false, true) => b"\x1bOB",
+            (false, false) => b"\x1b[B",
+        };
+        let encoded: Vec<u8> = arrow.repeat(lines.unsigned_abs() as usize);
+        report(self.tty.write(&encoded));
     }
 
     /// Encode this frame's key and text events and send them to the program.
@@ -914,6 +1133,25 @@ fn draw_cursor(
         _ => rect,
     };
     painter.rect_filled(filled, CornerRadius::ZERO, color);
+}
+
+/// The mouse encoder takes its geometry in whole pixels, and a cell measured in points is
+/// not a whole number of them — truncating it would put a click a couple of columns off by
+/// the right edge of a wide grid. Everything the encoder sees (positions, cell sizes,
+/// padding) is scaled by this instead, which keeps the units consistent and the truncation
+/// error under a thousandth of a cell.
+const MOUSE_PIXEL_SCALE: f32 = 256.0;
+
+/// The terminal button an egui pointer button stands for. The extra pair are the
+/// back/forward buttons, which xterm numbers eight and nine.
+fn mouse_button(button: egui::PointerButton) -> mouse::Button {
+    match button {
+        egui::PointerButton::Primary => mouse::Button::Left,
+        egui::PointerButton::Secondary => mouse::Button::Right,
+        egui::PointerButton::Middle => mouse::Button::Middle,
+        egui::PointerButton::Extra1 => mouse::Button::Eight,
+        egui::PointerButton::Extra2 => mouse::Button::Nine,
+    }
 }
 
 /// On macOS the copy chord is ⌘C, which no program would ever have been sent. Everywhere else

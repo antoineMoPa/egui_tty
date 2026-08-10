@@ -368,6 +368,122 @@ mod tests {
         assert_eq!(top_line(&mut terminal), scrolled_to);
     }
 
+    /// One frame with a mouse press or release at a position, which is what a program that
+    /// asked for mouse reporting is owed as an escape sequence.
+    fn mouse_buttoned(
+        terminal: &mut Terminal,
+        ctx: &egui::Context,
+        at: egui::Pos2,
+        pressed: bool,
+    ) {
+        let input = egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                },
+            ],
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 160.0),
+            )),
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ui| {
+            terminal.ui(ui, &TerminalStyle::from_visuals(ui.visuals()));
+        })
+        .drop_without_applying_deltas();
+    }
+
+    /// What claude and opencode do: turn on button tracking and the SGR format, then read
+    /// clicks to move their cursor. The click has to come back out as the SGR press and
+    /// release, not turn into a selection.
+    #[test]
+    fn a_program_reading_the_mouse_is_sent_the_click() {
+        let (mut terminal, writer, recorder) = terminal();
+        writer
+            .send(b"\x1b[?1002;1006h".to_vec())
+            .expect("expected the terminal to be listening");
+        terminal.poll();
+        let ctx = egui::Context::default();
+
+        // egui hit-tests against the previous frame's layout, so the widget has to have
+        // been drawn once before a press can land on it.
+        wheeled(&mut terminal, &ctx, 0.0);
+        mouse_buttoned(&mut terminal, &ctx, egui::pos2(80.0, 80.0), true);
+        mouse_buttoned(&mut terminal, &ctx, egui::pos2(80.0, 80.0), false);
+
+        let written = String::from_utf8_lossy(&recorder.written.lock().unwrap()).to_string();
+        assert!(
+            written.contains("\x1b[<0;") && written.contains('M') && written.ends_with('m'),
+            "expected an SGR press and release, got {written:?}"
+        );
+    }
+
+    /// And with nothing asked for, a click is a selection like it always was: nothing is
+    /// written to the program.
+    #[test]
+    fn a_click_is_not_sent_to_a_program_that_never_asked() {
+        let (mut terminal, _writer, recorder) = terminal();
+        let ctx = egui::Context::default();
+
+        mouse_buttoned(&mut terminal, &ctx, egui::pos2(80.0, 80.0), true);
+        mouse_buttoned(&mut terminal, &ctx, egui::pos2(80.0, 80.0), false);
+
+        assert!(
+            recorder.written.lock().unwrap().is_empty(),
+            "a click should stay in the widget"
+        );
+    }
+
+    /// The wheel over the same program is the pair of buttons that stand for it, so a
+    /// full-screen program scrolls instead of the viewport moving through the scrollback.
+    #[test]
+    fn the_wheel_reaches_a_program_reading_the_mouse_as_its_buttons() {
+        let (mut terminal, writer, recorder) = terminal();
+        writer
+            .send(b"\x1b[?1000;1006h".to_vec())
+            .expect("expected the terminal to be listening");
+        terminal.poll();
+        let ctx = egui::Context::default();
+
+        for _ in 0..20 {
+            wheeled(&mut terminal, &ctx, 4.0);
+        }
+
+        let written = String::from_utf8_lossy(&recorder.written.lock().unwrap()).to_string();
+        assert!(
+            written.contains("\x1b[<64;"),
+            "expected wheel-up button presses, got {written:?}"
+        );
+    }
+
+    /// A full-screen program that never asked for the mouse still expects the wheel to
+    /// move something — there is no scrollback on the alternate screen — so it arrives as
+    /// the arrow keys every terminal turns it into.
+    #[test]
+    fn the_wheel_reaches_the_alternate_screen_as_arrow_keys() {
+        let (mut terminal, writer, recorder) = terminal();
+        writer
+            .send(b"\x1b[?1049h".to_vec())
+            .expect("expected the terminal to be listening");
+        terminal.poll();
+        let ctx = egui::Context::default();
+
+        for _ in 0..20 {
+            wheeled(&mut terminal, &ctx, 4.0);
+        }
+
+        let written = String::from_utf8_lossy(&recorder.written.lock().unwrap()).to_string();
+        assert!(
+            written.contains("\x1b[A"),
+            "expected up arrows, got {written:?}"
+        );
+    }
+
     #[test]
     fn searching_finds_matches_in_the_scrollback() {
         let (mut terminal, writer, _) = terminal();
