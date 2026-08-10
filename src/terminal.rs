@@ -96,6 +96,8 @@ pub struct Terminal {
     /// What the exit notice calls this terminal, if the host gave it a name.
     label: Option<String>,
     poll_interval: Duration,
+    /// Whether the output channel wakes the UI itself yet — see `wake_on_output`.
+    wakes_on_output: bool,
     /// Set once the program is gone, so the widget says so instead of looking merely idle.
     exited: bool,
     /// Set by [`Terminal::request_focus`], and cleared by the frame that acts on it.
@@ -170,6 +172,7 @@ impl Terminal {
             rows,
             label: None,
             poll_interval: DEFAULT_POLL_INTERVAL,
+            wakes_on_output: false,
             exited: false,
             pending_focus: false,
             blink_clock: 0.0,
@@ -376,12 +379,36 @@ impl Terminal {
         received
     }
 
+    /// Wake the UI the moment the program writes, instead of on the widget's next poll tick.
+    fn wake_on_output(&mut self, ctx: &egui::Context) {
+        if self.wakes_on_output {
+            return;
+        }
+        self.wakes_on_output = true;
+        let (sender, receiver) = mpsc::channel();
+        let upstream = std::mem::replace(&mut self.output, receiver);
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            while let Ok(chunk) = upstream.recv() {
+                if sender.send(chunk).is_err() {
+                    return;
+                }
+                ctx.request_repaint();
+            }
+            // The program is gone: dropping the sender carries the disconnect through, and
+            // the wake is how the widget hears about it before its next tick.
+            drop(sender);
+            ctx.request_repaint();
+        });
+    }
+
     /// Draw the terminal into all the space the `ui` has left, and handle its input.
     ///
     /// While the program is alive the widget asks for the next frame itself, so output that
     /// arrives with nothing else going on still appears — see
     /// [`with_poll_interval`](Terminal::with_poll_interval).
     pub fn ui(&mut self, ui: &mut Ui, style: &TerminalStyle) -> Response {
+        self.wake_on_output(ui.ctx());
         self.poll();
         self.set_color_scheme(style.scheme);
 
@@ -709,11 +736,22 @@ impl Terminal {
             return;
         }
 
+        // A wheel report is a notch, not a line: a program reading the mouse scrolls itself
+        // by xterm's three lines for each press it hears, so a press per line
+        // tripled every gesture and a flick teleported the transcript.
+        let shift = ui.input(|input| input.modifiers.shift);
+        let to_program = !shift && self.reports_mouse();
+        let unit = if to_program {
+            cell_size.y * LINES_PER_WHEEL_PRESS
+        } else {
+            cell_size.y
+        };
+
         // A terminal scrolls in whole lines, and a trackpad scrolls in pixels — most of its
         // frames worth a fraction of one. Rounding each frame on its own threw those away, so
         // a gesture made of them moved nothing at all however far it went; what is left over
         // is kept instead, and the next frame adds to it until it is worth a line.
-        self.scroll_remainder += scroll / cell_size.y;
+        self.scroll_remainder += scroll / unit;
         let lines = self.scroll_remainder.trunc();
         self.scroll_remainder -= lines;
         let lines = lines as i32;
@@ -724,15 +762,13 @@ impl Terminal {
         // The wheel belongs to a program that asked for it — as the button presses mouse
         // reporting spells it, or as the arrow keys the alternate screen turns it into.
         // Shift held keeps the wheel on the viewport, like the pointer.
-        if !ui.input(|input| input.modifiers.shift) {
-            if self.reports_mouse() {
-                self.forward_wheel(ui, response, origin, cell_size, lines);
-                return;
-            }
-            if self.wheel_is_arrow_keys() {
-                self.send_wheel_arrows(lines);
-                return;
-            }
+        if to_program {
+            self.forward_wheel(ui, response, origin, cell_size, lines);
+            return;
+        }
+        if !shift && self.wheel_is_arrow_keys() {
+            self.send_wheel_arrows(lines);
+            return;
         }
 
         // Up on a wheel means back into the scrollback.
@@ -1141,6 +1177,10 @@ fn draw_cursor(
 /// padding) is scaled by this instead, which keeps the units consistent and the truncation
 /// error under a thousandth of a cell.
 const MOUSE_PIXEL_SCALE: f32 = 256.0;
+
+/// How many lines one wheel button press stands for, to a program that reads the mouse:
+/// xterm's three, which is what such a program scrolls itself by per press it hears.
+const LINES_PER_WHEEL_PRESS: f32 = 3.0;
 
 /// The terminal button an egui pointer button stands for. The extra pair are the
 /// back/forward buttons, which xterm numbers eight and nine.
