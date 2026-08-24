@@ -120,6 +120,10 @@ pub struct Terminal {
     /// The URL under the pointer, found afresh each frame it moves. Held so the row it is on
     /// can be drawn underlined without looking it up a second time.
     hovered_link: Option<links::Link>,
+    /// The link the pointer was over when the button went down, kept until the button comes
+    /// back up. `hovered_link` is cleared for as long as a gesture is in progress — the press
+    /// starts one — so the release has nothing left to open without this.
+    pressed_link: Option<links::Link>,
     /// The scheme the emulator's colors were last set for. Setting them is a whole palette's
     /// worth of work, so it happens when the scheme changes rather than every frame.
     colored_for: Option<ColorScheme>,
@@ -184,6 +188,7 @@ impl Terminal {
                 .map_err(|error| Error::context("failed to create a mouse event", error))?,
             mouse_button_down: None,
             hovered_link: None,
+            pressed_link: None,
             colored_for: None,
             emulator_colors: None,
         })
@@ -525,6 +530,7 @@ impl Terminal {
         // selection. Shift held keeps the selection, the escape every terminal offers.
         if self.reports_mouse() && !ui.input(|input| input.modifiers.shift) {
             self.hovered_link = None;
+            self.pressed_link = None;
             self.forward_mouse(ui, response, origin, cell_size);
             return;
         }
@@ -563,13 +569,14 @@ impl Terminal {
         let at = (at.x - response.rect.min.x, at.y - response.rect.min.y);
 
         if pressed && response.contains_pointer() {
+            self.pressed_link = self.hovered_link.clone();
             report(self.pointer.press(&self.emulator, cell, at, now));
         } else if self.pointer.dragging && released {
             // A click that never moved is not a selection: it is how a link is opened.
             let was_a_click = !self.pointer.dragged(&self.emulator);
             report(self.pointer.release(&self.emulator));
-            if was_a_click
-                && let Some(link) = &self.hovered_link
+            if let Some(link) = self.pressed_link.take()
+                && was_a_click
             {
                 ui.ctx().open_url(egui::OpenUrl::new_tab(&link.url));
             }
@@ -1459,5 +1466,130 @@ mod tests {
     #[test]
     fn a_control_combo_is_a_command_rather_than_text() {
         assert_eq!(encoded(key::Key::C, key::Mods::CTRL, None), b"\x03");
+    }
+
+    /// A terminal showing one printed URL, and where its cells landed on screen: the widget
+    /// is drawn once so the grid has a position to point at.
+    struct Clicking {
+        /// The write end of the program's output, held so the terminal does not report the
+        /// program as gone mid-test.
+        _writer: mpsc::Sender<Vec<u8>>,
+        ctx: egui::Context,
+        terminal: Terminal,
+        style: TerminalStyle,
+        origin: egui::Pos2,
+        cell: egui::Vec2,
+    }
+
+    impl Clicking {
+        fn at(shown: &str) -> Self {
+            let (writer, output) = mpsc::channel();
+            let terminal = Terminal::new(TtyStream {
+                output,
+                tty: Arc::new(Recorder::default()) as Arc<dyn Tty>,
+            })
+            .expect("expected a terminal");
+            writer
+                .send(shown.as_bytes().to_vec())
+                .expect("expected a listener");
+            let mut clicking = Self {
+                _writer: writer,
+                ctx: egui::Context::default(),
+                terminal,
+                style: TerminalStyle::default(),
+                origin: egui::Pos2::ZERO,
+                cell: vec2(1.0, 1.0),
+            };
+            clicking.frame(Vec::new());
+            clicking
+        }
+
+        /// One frame of the widget filling the window, with `events` as its input, reporting
+        /// whichever URL the frame asked the host to open.
+        fn frame(&mut self, events: Vec<egui::Event>) -> Option<String> {
+            let Self {
+                ctx,
+                terminal,
+                style,
+                origin,
+                cell,
+                ..
+            } = self;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0))),
+                events,
+                ..Default::default()
+            };
+
+            let output = ctx.run_ui(input, |ui| {
+                let response = terminal.ui(ui, style);
+                *cell = cell_size(ui.painter(), &style.font);
+                *origin = response.rect.min + vec2(style.padding, style.padding);
+            });
+            let opened = output
+                .platform_output
+                .commands
+                .iter()
+                .find_map(|command| match command {
+                    egui::OutputCommand::OpenUrl(url) => Some(url.url.clone()),
+                    _ => None,
+                });
+            output.drop_without_applying_deltas();
+            opened
+        }
+
+        /// The middle of a cell of the grid, which is where a pointer over it would be.
+        fn over(&self, x: u16, y: u16) -> egui::Pos2 {
+            self.origin
+                + vec2(
+                    (f32::from(x) + 0.5) * self.cell.x,
+                    (f32::from(y) + 0.5) * self.cell.y,
+                )
+        }
+    }
+
+    fn moved_to(at: egui::Pos2) -> egui::Event {
+        egui::Event::PointerMoved(at)
+    }
+
+    fn button(at: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// The whole gesture: a press and a release on a printed URL asks the host to open it.
+    /// The press starts a selection gesture, which is what used to clear the hovered link
+    /// before the release could read it — so a click opened nothing at all.
+    #[test]
+    fn a_click_on_a_url_opens_it() {
+        let mut clicking = Clicking::at("see https://example.com/docs now");
+        let at = clicking.over(10, 0);
+
+        assert_eq!(clicking.frame(vec![moved_to(at), button(at, true)]), None);
+        assert_eq!(
+            clicking.frame(vec![button(at, false)]).as_deref(),
+            Some("https://example.com/docs")
+        );
+    }
+
+    /// A drag over the same URL is a selection, and selecting text must not open anything.
+    #[test]
+    fn a_drag_across_a_url_selects_rather_than_opening_it() {
+        let mut clicking = Clicking::at("see https://example.com/docs now");
+        let from = clicking.over(6, 0);
+        let to = clicking.over(20, 0);
+
+        clicking.frame(vec![moved_to(from), button(from, true)]);
+        clicking.frame(vec![moved_to(to)]);
+
+        assert_eq!(
+            clicking.frame(vec![button(to, false)]),
+            None,
+            "a selection should not have opened a url"
+        );
     }
 }
