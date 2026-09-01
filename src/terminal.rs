@@ -726,13 +726,13 @@ impl Terminal {
                         // also the interrupt the program is the one that wanted it. The key
                         // event itself never arrives, so the byte is sent here instead.
                         _ if COPY_CHORD_IS_ALSO_INTERRUPT => {
-                            report(self.tty.write(&[0x03]));
+                            self.send_to_program(&[0x03]);
                         }
                         _ => {}
                     }
                 }
                 egui::Event::Paste(text) => match selection::encode_paste(&self.emulator, text) {
-                    Ok(bytes) => report(self.tty.write(&bytes)),
+                    Ok(bytes) => self.send_to_program(&bytes),
                     Err(error) => report(Err(error)),
                 },
                 _ => {}
@@ -882,7 +882,7 @@ impl Terminal {
             .collect();
         let mut text_index = 0usize;
 
-        self.encoder.set_options_from_terminal(&self.emulator);
+        self.configure_key_encoder();
         let mut encoded = Vec::new();
 
         for event in &events {
@@ -936,8 +936,31 @@ impl Terminal {
         }
 
         if !encoded.is_empty() {
-            report(self.tty.write(&encoded));
+            self.send_to_program(&encoded);
         }
+    }
+
+    /// Send input to the program, and bring the bottom of the screen back into view.
+    ///
+    /// Input is aimed at the prompt, and the prompt is at the bottom: someone who scrolled up
+    /// to read something and then typed would otherwise be typing out of sight.
+    fn send_to_program(&mut self, bytes: &[u8]) {
+        self.emulator.scroll_viewport(ScrollViewport::Bottom);
+        report(self.tty.write(bytes));
+    }
+
+    /// Point the key encoder at the program's current protocol: application cursor keys,
+    /// the Kitty keyboard protocol and the rest are the program's to ask for.
+    ///
+    /// Option as the meta key is not, and libghostty forgets it each time the program's
+    /// options are read, so it is set again after them. It is what a terminal a shell is
+    /// worked in is set to: option+y is the yank-pop readline binds after a ctrl+k, rather
+    /// than the yen sign macOS types for it. The cost is the other thing option does there,
+    /// option+e as the start of an accented character, which a shell has no use for.
+    fn configure_key_encoder(&mut self) {
+        self.encoder
+            .set_options_from_terminal(&self.emulator)
+            .set_macos_option_as_alt(key::OptionAsAlt::True);
     }
 
     /// Whether the running program asked for the Kitty keyboard protocol, and so reads the
@@ -1344,7 +1367,7 @@ mod tests {
         }
         drop(writer);
 
-        terminal.encoder.set_options_from_terminal(&terminal.emulator);
+        terminal.configure_key_encoder();
         let mut out = Vec::new();
         terminal
             .encode_key(key, mods, text.map(str::to_string), false, &mut out)
@@ -1414,6 +1437,14 @@ mod tests {
     #[test]
     fn a_plain_letter_is_sent_as_itself() {
         assert_eq!(encoded(key::Key::A, key::Mods::empty(), Some("a")), b"a");
+    }
+
+    /// Option is the meta key. macOS types a yen sign for option+y, and a shell given that
+    /// would insert it; what a shell binds is ESC y, readline's yank-pop.
+    #[test]
+    fn an_option_letter_is_sent_as_the_meta_chord_rather_than_the_symbol_it_types() {
+        assert_eq!(encoded(key::Key::Y, key::Mods::ALT, Some("\u{a5}")), b"\x1by");
+        assert_eq!(encoded(key::Key::B, key::Mods::ALT, Some("\u{222b}")), b"\x1bb");
     }
 
     #[test]
@@ -1697,6 +1728,49 @@ mod tests {
             clicking.frame(vec![button(to, false)]),
             None,
             "a selection should not have opened a url"
+        );
+    }
+
+    /// A letter typed with the keyboard in the terminal, as the platform reports one.
+    fn typed(key: egui::Key, text: &str) -> Vec<egui::Event> {
+        vec![
+            egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::Text(text.to_string()),
+        ]
+    }
+
+    /// Scrolled up to read something, then typing: the prompt is at the bottom, so that is
+    /// where the keystroke takes the view.
+    #[test]
+    fn typing_brings_the_view_back_to_the_bottom() {
+        let lines: String = (0..200).map(|n| format!("line {n}\r\n")).collect();
+        let mut clicking = Clicking::at(&lines);
+        let here = clicking.over(0, 0);
+        clicking.frame(vec![moved_to(here), button(here, true)]);
+        clicking.frame(vec![button(here, false)]);
+
+        clicking
+            .terminal
+            .emulator
+            .scroll_viewport(ScrollViewport::Delta(-100));
+        let shown = clicking.terminal.visible_text().expect("expected the screen");
+        assert!(
+            !shown.contains("line 199"),
+            "the view should have been scrolled up into the scrollback, showed {shown:?}"
+        );
+
+        clicking.frame(typed(egui::Key::A, "a"));
+
+        let shown = clicking.terminal.visible_text().expect("expected the screen");
+        assert!(
+            shown.contains("line 199"),
+            "typing should have brought the bottom back into view, showed {shown:?}"
         );
     }
 }
