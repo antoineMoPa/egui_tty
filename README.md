@@ -12,7 +12,8 @@ So this is a real terminal, not a log view. Full-screen programs, mouse reportin
 paste, OSC 8 links, the Kitty keyboard protocol — all of it works, because the engine
 underneath is the one shipping in Ghostty.
 
-- text selection, including double-click words, triple-click lines and alt-drag blocks
+- text selection, including double-click words, triple-click lines, alt-drag blocks and
+  shift-click to carry a selection on, across a scroll if need be
 - clickable links, both OSC 8 and plain printed URLs
 - search over the screen and the scrollback
 - a light color scheme for light themes, where Ghostty's own would be unreadable

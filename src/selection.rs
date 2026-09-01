@@ -40,6 +40,9 @@ pub(crate) struct Pointer {
     release: ReleaseEvent<'static>,
     /// Set between a press inside the grid and the release that ends it.
     pub(crate) dragging: bool,
+    /// When the last press landed, so a shift-click can tell a continued selection from
+    /// the second click of a double-click.
+    last_press: Option<Duration>,
 }
 
 impl Pointer {
@@ -54,6 +57,7 @@ impl Pointer {
             release: ReleaseEvent::new()
                 .map_err(|error| Error::context("failed to create a release event", error))?,
             dragging: false,
+            last_press: None,
         })
     }
 
@@ -85,6 +89,38 @@ impl Pointer {
             .set_selection(selection.as_ref())
             .map_err(|error| Error::context("failed to set the selection", error))?;
 
+        self.dragging = true;
+        self.last_press = Some(now);
+        Ok(())
+    }
+
+    /// Whether a press now would continue the last selection rather than start a new one,
+    /// which is what a press with shift held asks for. The gesture machine keeps its anchor
+    /// after the release, so there has to have been a press on this screen — and long
+    /// enough ago that this press is not the second half of a double-click, which the
+    /// machine has to see as a press to count.
+    pub(crate) fn can_extend(&self, terminal: &Terminal<'_, '_>, now: Duration) -> bool {
+        let anchored = matches!(self.gesture.anchor(terminal), Ok(Some(_)));
+        let since_press = self
+            .last_press
+            .map(|at| now.saturating_sub(at))
+            .unwrap_or(Duration::MAX);
+        anchored && since_press > REPEAT_INTERVAL
+    }
+
+    /// A press with shift held: the selection runs from where the last one was anchored to
+    /// this cell, as if the pointer had been dragged there without letting go. The viewport
+    /// may have scrolled in between — the anchor is tracked through the scrollback, so a
+    /// selection can start on screen, scroll, and finish off it.
+    pub(crate) fn extend(
+        &mut self,
+        terminal: &Terminal<'_, '_>,
+        cell: Cell,
+        at: (f32, f32),
+        geometry: Geometry,
+        rectangle: bool,
+    ) -> Result<()> {
+        self.drag(terminal, cell, at, geometry, rectangle)?;
         self.dragging = true;
         Ok(())
     }
@@ -298,6 +334,79 @@ mod tests {
 
         assert!(pointer.dragged(&terminal), "the pointer swept four cells");
         assert!(!pointer.dragging, "and the release ended the gesture");
+    }
+
+    /// Shift and a press well after the last gesture ended runs the selection on from
+    /// where it was anchored, which is how a selection longer than a drag is made.
+    #[test]
+    fn a_shift_click_after_the_release_extends_the_selection() {
+        let terminal = terminal_showing("hello world again");
+        let mut pointer = drag_across(&terminal, cell(0, 0), cell(4, 0));
+        assert_eq!(selected_text(&terminal).as_deref(), Some("hello"));
+
+        let later = Duration::from_secs(3);
+        assert!(pointer.can_extend(&terminal, later), "the gesture kept its anchor");
+        pointer
+            .extend(
+                &terminal,
+                cell(10, 0),
+                at(cell(10, 0), 0.75),
+                geometry(40, CELL_WIDTH, 0.0, CELL_HEIGHT * 5.0),
+                false,
+            )
+            .expect("expected the extension to land");
+        assert!(pointer.dragging, "the button is down, so motion keeps extending");
+        pointer.release(&terminal).expect("expected the release");
+
+        assert_eq!(selected_text(&terminal).as_deref(), Some("hello world"));
+    }
+
+    /// The anchor is a place in the scrollback, not on screen: a selection started before a
+    /// scroll and finished after it covers everything scrolled past in between.
+    #[test]
+    fn a_selection_extends_across_a_scroll() {
+        let lines: Vec<String> = (0..10).map(|n| format!("line{n}")).collect();
+        let mut terminal = terminal_showing(&lines.join("\r\n"));
+        // Five rows showing line5 to line9; back up to the top so line0 is on screen.
+        terminal.scroll_viewport(libghostty_vt::terminal::ScrollViewport::Delta(-5));
+        let mut pointer = drag_across(&terminal, cell(0, 0), cell(4, 0));
+        assert_eq!(selected_text(&terminal).as_deref(), Some("line0"));
+
+        terminal.scroll_viewport(libghostty_vt::terminal::ScrollViewport::Delta(5));
+        assert!(pointer.can_extend(&terminal, Duration::from_secs(3)));
+        pointer
+            .extend(
+                &terminal,
+                cell(4, 4),
+                at(cell(4, 4), 0.75),
+                geometry(40, CELL_WIDTH, 0.0, CELL_HEIGHT * 5.0),
+                false,
+            )
+            .expect("expected the extension to land");
+        pointer.release(&terminal).expect("expected the release");
+
+        let selected = selected_text(&terminal).expect("expected a selection");
+        assert!(selected.starts_with("line0"), "got {selected:?}");
+        assert!(selected.ends_with("line9"), "got {selected:?}");
+    }
+
+    /// A press soon after the last one is the second click of a double-click, whatever the
+    /// modifiers, and has to reach the gesture machine as a press for it to count.
+    #[test]
+    fn a_press_within_the_repeat_interval_is_a_click_rather_than_an_extension() {
+        let terminal = terminal_showing("hello world");
+        let pointer = drag_across(&terminal, cell(0, 0), cell(4, 0));
+
+        assert!(!pointer.can_extend(&terminal, Duration::from_millis(1_100)));
+        assert!(pointer.can_extend(&terminal, Duration::from_millis(1_500)));
+    }
+
+    #[test]
+    fn nothing_to_extend_before_a_first_press() {
+        let terminal = terminal_showing("hello world");
+        let pointer = Pointer::new().expect("expected a gesture");
+
+        assert!(!pointer.can_extend(&terminal, Duration::from_secs(10)));
     }
 
     #[test]

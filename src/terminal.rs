@@ -517,7 +517,8 @@ impl Terminal {
     ///
     /// Ghostty's gesture machine decides what a press means — one click clears, two select a
     /// word, three a line — so all this does is tell it where the pointer is and when the
-    /// button went down and up.
+    /// button went down and up. The one press it is not told about as a press is one with
+    /// shift held, which goes in as a drag so the last selection carries on to it.
     fn handle_pointer(
         &mut self,
         ui: &Ui,
@@ -568,9 +569,29 @@ impl Terminal {
         };
         let at = (at.x - response.rect.min.x, at.y - response.rect.min.y);
 
+        let geometry = selection::geometry(
+            self.cols,
+            cell_size.x,
+            origin.x - response.rect.min.x,
+            response.rect.height().max(1.0),
+        );
+        // Alt turns a drag into a block selection, which is how a column of output is
+        // taken out of a table without its neighbours.
+        let (shift, rectangle) = ui.input(|input| (input.modifiers.shift, input.modifiers.alt));
+
         if pressed && response.contains_pointer() {
-            self.pressed_link = self.hovered_link.clone();
-            report(self.pointer.press(&self.emulator, cell, at, now));
+            if shift && self.pointer.can_extend(&self.emulator, now) {
+                // Shift carries the last selection on to here — after a scroll, if need
+                // be — rather than starting over. Not a click, so nothing to open.
+                self.pressed_link = None;
+                report(
+                    self.pointer
+                        .extend(&self.emulator, cell, at, geometry, rectangle),
+                );
+            } else {
+                self.pressed_link = self.hovered_link.clone();
+                report(self.pointer.press(&self.emulator, cell, at, now));
+            }
         } else if self.pointer.dragging && released {
             // A click that never moved is not a selection: it is how a link is opened.
             let was_a_click = !self.pointer.dragged(&self.emulator);
@@ -581,15 +602,6 @@ impl Terminal {
                 ui.ctx().open_url(egui::OpenUrl::new_tab(&link.url));
             }
         } else if self.pointer.dragging {
-            let geometry = selection::geometry(
-                self.cols,
-                cell_size.x,
-                origin.x - response.rect.min.x,
-                response.rect.height().max(1.0),
-            );
-            // Alt turns a drag into a block selection, which is how a column of output is
-            // taken out of a table without its neighbours.
-            let rectangle = ui.input(|input| input.modifiers.alt);
             report(
                 self.pointer
                     .drag(&self.emulator, cell, at, geometry, rectangle),
@@ -1479,6 +1491,9 @@ mod tests {
         style: TerminalStyle,
         origin: egui::Pos2,
         cell: egui::Vec2,
+        /// The widget's clock, in seconds, which is what tells a double-click from two
+        /// clicks. Each frame is a sixtieth of a second unless a test waits longer.
+        clock: f64,
     }
 
     impl Clicking {
@@ -1499,25 +1514,51 @@ mod tests {
                 style: TerminalStyle::default(),
                 origin: egui::Pos2::ZERO,
                 cell: vec2(1.0, 1.0),
+                clock: 0.0,
             };
             clicking.frame(Vec::new());
             clicking
         }
 
+        /// Let this much time pass before the next frame.
+        fn wait(&mut self, seconds: f64) {
+            self.clock += seconds;
+        }
+
         /// One frame of the widget filling the window, with `events` as its input, reporting
         /// whichever URL the frame asked the host to open.
         fn frame(&mut self, events: Vec<egui::Event>) -> Option<String> {
+            self.frame_with(events, egui::Modifiers::NONE)
+        }
+
+        /// The same frame with shift held throughout it.
+        fn frame_shifted(&mut self, events: Vec<egui::Event>) -> Option<String> {
+            self.frame_with(shifted(events), egui::Modifiers::SHIFT)
+        }
+
+        fn frame_with(
+            &mut self,
+            events: Vec<egui::Event>,
+            modifiers: egui::Modifiers,
+        ) -> Option<String> {
+            self.clock += 1.0 / 60.0;
+            // egui learns which modifiers are down from this event, not from the frame.
+            let events = std::iter::once(egui::Event::ModifiersChanged(modifiers))
+                .chain(events)
+                .collect();
             let Self {
                 ctx,
                 terminal,
                 style,
                 origin,
                 cell,
+                clock,
                 ..
             } = self;
             let input = egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0))),
                 events,
+                time: Some(*clock),
                 ..Default::default()
             };
 
@@ -1561,6 +1602,27 @@ mod tests {
         }
     }
 
+    /// The same events with shift held on each button press and release.
+    fn shifted(events: Vec<egui::Event>) -> Vec<egui::Event> {
+        events
+            .into_iter()
+            .map(|event| match event {
+                egui::Event::PointerButton {
+                    pos,
+                    button,
+                    pressed,
+                    ..
+                } => egui::Event::PointerButton {
+                    pos,
+                    button,
+                    pressed,
+                    modifiers: egui::Modifiers::SHIFT,
+                },
+                other => other,
+            })
+            .collect()
+    }
+
     /// The whole gesture: a press and a release on a printed URL asks the host to open it.
     /// The press starts a selection gesture, which is what used to clear the hovered link
     /// before the release could read it — so a click opened nothing at all.
@@ -1574,6 +1636,51 @@ mod tests {
             clicking.frame(vec![button(at, false)]).as_deref(),
             Some("https://example.com/docs")
         );
+    }
+
+    /// Select some, let go, scroll if need be, then shift-click further on: the selection
+    /// runs from where it started to the shift-click, the way it does in every terminal.
+    #[test]
+    fn a_shift_click_carries_the_selection_on_from_where_it_started() {
+        let mut clicking = Clicking::at("hello world again");
+        let from = clicking.over(0, 0);
+        let to = clicking.over(4, 0);
+        clicking.frame(vec![moved_to(from), button(from, true)]);
+        clicking.frame(vec![moved_to(to)]);
+        clicking.frame(vec![button(to, false)]);
+        assert_eq!(
+            selection::selected_text(&clicking.terminal.emulator).as_deref(),
+            Some("hello")
+        );
+
+        clicking.wait(2.0);
+        let further = clicking.over(10, 0);
+        clicking.frame_shifted(vec![moved_to(further), button(further, true)]);
+        clicking.frame_shifted(vec![button(further, false)]);
+
+        assert_eq!(
+            selection::selected_text(&clicking.terminal.emulator).as_deref(),
+            Some("hello world"),
+            "the selection should run on to the shift-click"
+        );
+    }
+
+    /// Without shift, a click after a selection starts over — and clears it.
+    #[test]
+    fn a_plain_click_after_a_selection_starts_over() {
+        let mut clicking = Clicking::at("hello world again");
+        let from = clicking.over(0, 0);
+        let to = clicking.over(4, 0);
+        clicking.frame(vec![moved_to(from), button(from, true)]);
+        clicking.frame(vec![moved_to(to)]);
+        clicking.frame(vec![button(to, false)]);
+
+        clicking.wait(2.0);
+        let further = clicking.over(10, 0);
+        clicking.frame(vec![moved_to(further), button(further, true)]);
+        clicking.frame(vec![button(further, false)]);
+
+        assert_eq!(selection::selected_text(&clicking.terminal.emulator), None);
     }
 
     /// A drag over the same URL is a selection, and selecting text must not open anything.
