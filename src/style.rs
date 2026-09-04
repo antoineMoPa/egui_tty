@@ -30,8 +30,18 @@ pub struct TerminalStyle {
     pub padding: f32,
     /// The cursor, when the running program has not asked for a color of its own.
     pub cursor: Color32,
-    /// What bold text is drawn in. egui's bundled monospace font has no bold face, so bold
-    /// is rendered as ink mixed toward this rather than as a heavier stroke.
+    /// The face bold text is drawn in, when there is one to draw it in. It has to have the
+    /// same advance as [`font`](Self::font), or a bold word steps out of the grid's columns.
+    ///
+    /// egui's bundled monospace font comes in one weight, so there is none by default and
+    /// bold is drawn as ink mixed toward [`bold_ink`](Self::bold_ink) instead.
+    pub bold_font: Option<FontId>,
+    /// The face italic text is drawn in, when there is one; the same advance as
+    /// [`font`](Self::font), as for [`bold_font`](Self::bold_font). Without one, italic is
+    /// the regular face sheared to a slant.
+    pub italic_font: Option<FontId>,
+    /// What bold text is drawn in when there is no [`bold_font`](Self::bold_font): ink
+    /// mixed toward this, rather than a heavier stroke.
     pub bold_ink: Color32,
     /// The "[… exited]" notice, and anything else the widget says rather than draws.
     pub notice_ink: Color32,
@@ -51,6 +61,8 @@ impl TerminalStyle {
     pub fn from_visuals(visuals: &Visuals) -> Self {
         Self {
             font: FontId::monospace(12.0),
+            bold_font: None,
+            italic_font: None,
             scheme: if visuals.dark_mode {
                 ColorScheme::Dark
             } else {

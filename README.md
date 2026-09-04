@@ -17,6 +17,8 @@ underneath is the one shipping in Ghostty.
 - clickable links, both OSC 8 and plain printed URLs
 - search over the screen and the scrollback
 - a light color scheme for light themes, where Ghostty's own would be unreadable
+- bold and italic set in real faces, given a `bold_font` and an `italic_font`; brighter ink
+  and a shear of the regular face without
 - attach anything: a local pty, a socket to another machine, a test harness
 
 ```rust

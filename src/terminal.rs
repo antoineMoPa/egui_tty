@@ -1280,7 +1280,6 @@ impl Run {
         let mut format = TextFormat {
             font_id: style.font.clone(),
             color: self.style.fg,
-            italics: self.style.italic,
             ..Default::default()
         };
         if self.style.underline {
@@ -1289,10 +1288,25 @@ impl Run {
         if self.style.strikethrough {
             format.strikethrough = Stroke::new(1.0, self.style.fg);
         }
-        // egui's bundled monospace font has no bold face, so bold is rendered as a brighter
-        // ink against the same background rather than a heavier stroke.
+        // A real face where the style has one; otherwise bold is a brighter ink against the
+        // same background and italic is the regular face sheared, since egui's own
+        // monospace font comes in one weight and no slant.
+        if self.style.italic {
+            match &style.italic_font {
+                Some(font) => format.font_id = font.clone(),
+                None => format.italics = true,
+            }
+        }
         if self.style.bold {
-            format.color = mix(self.style.fg, style.bold_ink);
+            match &style.bold_font {
+                // Bold and italic together is the bold face sheared: two faces are what
+                // ship, not four.
+                Some(font) => {
+                    format.font_id = font.clone();
+                    format.italics = self.style.italic;
+                }
+                None => format.color = mix(self.style.fg, style.bold_ink),
+            }
         }
         job.append(&self.text, 0.0, format);
         self.text.clear();
@@ -1373,6 +1387,67 @@ mod tests {
             .encode_key(key, mods, text.map(str::to_string), false, &mut out)
             .expect("expected the keystroke to encode");
         out
+    }
+
+    fn styled(bold: bool, italic: bool) -> CellStyle {
+        CellStyle {
+            fg: Color32::RED,
+            bold,
+            italic,
+            underline: false,
+            strikethrough: false,
+        }
+    }
+
+    fn laid_out(style: &TerminalStyle, cell: CellStyle) -> TextFormat {
+        let mut job = LayoutJob::default();
+        Run::new(cell, "x").flush(&mut job, style);
+        job.sections
+            .pop()
+            .expect("expected the run to have been laid out")
+            .format
+    }
+
+    /// Given faces to set them in, bold and italic runs are set in those faces, in the
+    /// program's own color: nothing is faked once there is a real face for it.
+    #[test]
+    fn bold_and_italic_are_set_in_their_own_faces_when_given_them() {
+        let bold = FontId::new(12.0, egui::FontFamily::Name("bold".into()));
+        let italic = FontId::new(12.0, egui::FontFamily::Name("italic".into()));
+        let style = TerminalStyle {
+            bold_font: Some(bold.clone()),
+            italic_font: Some(italic.clone()),
+            ..TerminalStyle::default()
+        };
+
+        let format = laid_out(&style, styled(true, false));
+        assert_eq!(format.font_id, bold);
+        assert_eq!(format.color, Color32::RED);
+        assert!(!format.italics);
+
+        let format = laid_out(&style, styled(false, true));
+        assert_eq!(format.font_id, italic);
+        assert!(!format.italics);
+
+        // Both at once is the bold face sheared: two faces ship, not four.
+        let format = laid_out(&style, styled(true, true));
+        assert_eq!(format.font_id, bold);
+        assert!(format.italics);
+    }
+
+    /// Without faces, what there was before: bold as brighter ink, italic as a shear.
+    #[test]
+    fn bold_and_italic_are_faked_without_faces_of_their_own() {
+        let style = TerminalStyle::default();
+
+        let format = laid_out(&style, styled(true, false));
+        assert_eq!(format.font_id, style.font);
+        assert_eq!(format.color, mix(Color32::RED, style.bold_ink));
+
+        let format = laid_out(&style, styled(false, true));
+        assert_eq!(format.font_id, style.font);
+        assert!(format.italics);
+        assert_eq!(format.color, Color32::RED);
     }
 
     /// The `;5D` bug: readline binds none of `ESC [ 1 ; 5 D`, so ⌃← used to type the tail of
