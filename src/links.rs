@@ -58,10 +58,7 @@ fn marked_link_at(terminal: &Terminal<'_, '_>, cols: u16, x: u16, y: u16) -> Opt
 
 fn hyperlink_uri(terminal: &Terminal<'_, '_>, x: u16, y: u16) -> Option<String> {
     let grid_ref = terminal
-        .grid_ref(Point::Viewport(PointCoordinate {
-            x,
-            y: u32::from(y),
-        }))
+        .grid_ref(Point::Viewport(PointCoordinate { x, y: u32::from(y) }))
         .ok()?;
 
     let mut buffer = [0u8; 2048];
@@ -94,10 +91,7 @@ fn row_text(terminal: &Terminal<'_, '_>, cols: u16, y: u16) -> Vec<char> {
 
     for x in 0..cols {
         let character = terminal
-            .grid_ref(Point::Viewport(PointCoordinate {
-                x,
-                y: u32::from(y),
-            }))
+            .grid_ref(Point::Viewport(PointCoordinate { x, y: u32::from(y) }))
             .ok()
             .and_then(|grid_ref| {
                 let written = grid_ref.graphemes(&mut graphemes).ok()?;
@@ -126,8 +120,12 @@ fn find_url(row: &[char], at: usize) -> Option<Range<usize>> {
 
 fn find_from(row: &[char], from: usize, needle: &str) -> Option<usize> {
     let width = needle.chars().count();
-    (from..row.len().saturating_sub(width) + 1)
-        .find(|start| row[*start..start + width].iter().copied().eq(needle.chars()))
+    (from..row.len().saturating_sub(width) + 1).find(|start| {
+        row[*start..start + width]
+            .iter()
+            .copied()
+            .eq(needle.chars())
+    })
 }
 
 /// A URL runs to the first space or control character, minus whatever punctuation it ends on.
@@ -177,8 +175,9 @@ mod tests {
     /// covers have to come from the escape rather than from the text.
     #[test]
     fn an_osc_8_link_is_found_by_the_uri_it_carries() {
-        let terminal =
-            terminal_showing("see \x1b]8;;https://example.com/deep\x1b\\click here\x1b]8;;\x1b\\ ok");
+        let terminal = terminal_showing(
+            "see \x1b]8;;https://example.com/deep\x1b\\click here\x1b]8;;\x1b\\ ok",
+        );
 
         let link = link_at(&terminal, 60, 6, 0).expect("expected a link");
         assert_eq!(link.url, "https://example.com/deep");
@@ -206,9 +205,16 @@ mod tests {
         let line = row("see https://example.com/x now");
         let span = find_url(&line, 4).expect("the first character of it");
 
-        assert_eq!(line[span.clone()].iter().collect::<String>(), "https://example.com/x");
+        assert_eq!(
+            line[span.clone()].iter().collect::<String>(),
+            "https://example.com/x"
+        );
         assert_eq!(find_url(&line, 10), Some(span.clone()), "from the middle");
-        assert_eq!(find_url(&line, span.end - 1), Some(span), "from the last one");
+        assert_eq!(
+            find_url(&line, span.end - 1),
+            Some(span),
+            "from the last one"
+        );
     }
 
     #[test]
@@ -260,9 +266,6 @@ mod tests {
         let line = row("http://one.example http://two.example");
         let span = find_url(&line, 25).expect("a url");
 
-        assert_eq!(
-            line[span].iter().collect::<String>(),
-            "http://two.example"
-        );
+        assert_eq!(line[span].iter().collect::<String>(), "http://two.example");
     }
 }

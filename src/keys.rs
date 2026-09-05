@@ -144,11 +144,7 @@ pub(crate) fn vt_mods(modifiers: egui::Modifiers) -> Mods {
 /// `?` is shift and the `/` key. A program told "the `/` key, with shift" has to work the
 /// character out for itself, and one speaking the Kitty keyboard protocol reasonably does not
 /// — it reads the key. Marking shift as consumed says the character in hand is the answer.
-pub(crate) fn shift_was_consumed(
-    mods: Mods,
-    unshifted: Option<char>,
-    text: Option<&str>,
-) -> bool {
+pub(crate) fn shift_was_consumed(mods: Mods, unshifted: Option<char>, text: Option<&str>) -> bool {
     if !mods.contains(Mods::SHIFT) {
         return false;
     }

@@ -42,10 +42,20 @@ pub(crate) fn find_all(terminal: &Terminal<'_, '_>, query: &str) -> Vec<Match> {
         if lowered.len() != characters.len() {
             // A character that changes length when lowercased would put the columns out;
             // rather than report the wrong cells, this row is matched exactly instead.
-            find_in_row(&characters, &query.chars().collect::<Vec<_>>(), row, &mut found);
+            find_in_row(
+                &characters,
+                &query.chars().collect::<Vec<_>>(),
+                row,
+                &mut found,
+            );
             continue;
         }
-        find_in_row(&lowered, &needle.chars().collect::<Vec<_>>(), row, &mut found);
+        find_in_row(
+            &lowered,
+            &needle.chars().collect::<Vec<_>>(),
+            row,
+            &mut found,
+        );
     }
     found
 }
@@ -67,11 +77,7 @@ fn find_in_row(haystack: &[char], needle: &[char], row: usize, out: &mut Vec<Mat
 
 /// Bring a match into view and select it, so it reads the same as anything else the pointer
 /// had picked out.
-pub(crate) fn show(
-    terminal: &mut Terminal<'_, '_>,
-    found: Match,
-    rows: u16,
-) -> Result<()> {
+pub(crate) fn show(terminal: &mut Terminal<'_, '_>, found: Match, rows: u16) -> Result<()> {
     // A match in the middle of the pane is easier to read than one against the top edge.
     let above = usize::from(rows / 2);
     terminal.scroll_viewport(ScrollViewport::Row(found.row.saturating_sub(above)));
@@ -165,7 +171,9 @@ mod tests {
     /// the row it comes back with counts from the top of the scrollback.
     #[test]
     fn a_match_that_scrolled_off_the_screen_is_still_found() {
-        let mut lines: Vec<String> = (0..40).map(|index| format!("filler line {index}")).collect();
+        let mut lines: Vec<String> = (0..40)
+            .map(|index| format!("filler line {index}"))
+            .collect();
         lines.insert(3, "the needle is here".to_string());
         let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
         let terminal = terminal_showing(&borrowed);
@@ -177,7 +185,9 @@ mod tests {
 
     #[test]
     fn showing_a_match_scrolls_to_it_and_selects_it() {
-        let mut lines: Vec<String> = (0..40).map(|index| format!("filler line {index}")).collect();
+        let mut lines: Vec<String> = (0..40)
+            .map(|index| format!("filler line {index}"))
+            .collect();
         lines.insert(3, "the needle is here".to_string());
         let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
         let mut terminal = terminal_showing(&borrowed);
@@ -185,8 +195,8 @@ mod tests {
         let found = find_all(&terminal, "needle");
         show(&mut terminal, found[0], 4).expect("expected the match to be shown");
 
-        let selected = crate::selection::selected_text(&terminal)
-            .expect("showing a match selects it");
+        let selected =
+            crate::selection::selected_text(&terminal).expect("showing a match selects it");
         assert_eq!(selected, "needle");
     }
 

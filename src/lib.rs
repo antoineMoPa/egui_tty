@@ -179,7 +179,11 @@ mod tests {
 
         assert_eq!(terminal.title().as_deref(), Some("a title"));
         assert_eq!(
-            terminal.visible_text().expect("expected the screen").lines().next(),
+            terminal
+                .visible_text()
+                .expect("expected the screen")
+                .lines()
+                .next(),
             Some("red")
         );
     }
@@ -258,7 +262,10 @@ mod tests {
         );
 
         let written = recorder.written.lock().unwrap().clone();
-        assert_ne!(written, b"\x1bb", "the chord should not have been rewritten");
+        assert_ne!(
+            written, b"\x1bb",
+            "the chord should not have been rewritten"
+        );
         assert!(
             String::from_utf8_lossy(&written).contains("[1;5"),
             "expected the chord itself, got {:?}",
@@ -370,12 +377,7 @@ mod tests {
 
     /// One frame with a mouse press or release at a position, which is what a program that
     /// asked for mouse reporting is owed as an escape sequence.
-    fn mouse_buttoned(
-        terminal: &mut Terminal,
-        ctx: &egui::Context,
-        at: egui::Pos2,
-        pressed: bool,
-    ) {
+    fn mouse_buttoned(terminal: &mut Terminal, ctx: &egui::Context, at: egui::Pos2, pressed: bool) {
         let input = egui::RawInput {
             events: vec![
                 egui::Event::PointerMoved(at),

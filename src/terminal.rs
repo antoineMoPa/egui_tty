@@ -296,7 +296,11 @@ impl Terminal {
                 if view.graphemes_len().unwrap_or(0) > 0 {
                     let _ = view.graphemes_utf8(&mut cell_text);
                 }
-                line.push_str(if cell_text.is_empty() { " " } else { &cell_text });
+                line.push_str(if cell_text.is_empty() {
+                    " "
+                } else {
+                    &cell_text
+                });
             }
             out.push_str(line.trim_end());
             out.push('\n');
@@ -432,9 +436,7 @@ impl Terminal {
         // A drag as well as a click: selecting text is a drag, and a pointer that never
         // clicked would leave the terminal without the keyboard — so the copy that a selection
         // is made for would go to whatever had it instead.
-        if response.clicked()
-            || response.drag_started()
-            || std::mem::take(&mut self.pending_focus)
+        if response.clicked() || response.drag_started() || std::mem::take(&mut self.pending_focus)
         {
             response.request_focus();
         }
@@ -658,7 +660,12 @@ impl Terminal {
                         continue;
                     }
                     let modifiers = ui.input(|input| input.modifiers);
-                    (mouse::Action::Motion, self.mouse_button_down, modifiers, *pos)
+                    (
+                        mouse::Action::Motion,
+                        self.mouse_button_down,
+                        modifiers,
+                        *pos,
+                    )
                 }
                 _ => continue,
             };
@@ -981,7 +988,11 @@ impl Terminal {
     ) -> Result<()> {
         let mut event = key::Event::new()
             .map_err(|error| Error::context("failed to create a key event", error))?;
-        event.set_action(if repeat { Action::Repeat } else { Action::Press });
+        event.set_action(if repeat {
+            Action::Repeat
+        } else {
+            Action::Press
+        });
         event.set_key(vt);
         event.set_mods(mods);
         let unshifted = keys::unshifted_codepoint(vt);
@@ -1376,7 +1387,9 @@ mod tests {
         })
         .expect("expected a terminal");
         if !asked_for.is_empty() {
-            writer.send(asked_for.to_vec()).expect("expected a listener");
+            writer
+                .send(asked_for.to_vec())
+                .expect("expected a listener");
             terminal.poll();
         }
         drop(writer);
@@ -1472,8 +1485,14 @@ mod tests {
     /// is what knows about application cursor keys and the rest.
     #[test]
     fn every_other_key_is_left_to_the_encoder() {
-        assert_eq!(legacy_editing_chord(key::Key::ArrowLeft, key::Mods::empty()), None);
-        assert_eq!(legacy_editing_chord(key::Key::ArrowUp, key::Mods::CTRL), None);
+        assert_eq!(
+            legacy_editing_chord(key::Key::ArrowLeft, key::Mods::empty()),
+            None
+        );
+        assert_eq!(
+            legacy_editing_chord(key::Key::ArrowUp, key::Mods::CTRL),
+            None
+        );
         assert_eq!(legacy_editing_chord(key::Key::A, key::Mods::CTRL), None);
         // Shift held as well is a selection in whatever reads it, not a word motion.
         assert_eq!(
@@ -1518,8 +1537,14 @@ mod tests {
     /// would insert it; what a shell binds is ESC y, readline's yank-pop.
     #[test]
     fn an_option_letter_is_sent_as_the_meta_chord_rather_than_the_symbol_it_types() {
-        assert_eq!(encoded(key::Key::Y, key::Mods::ALT, Some("\u{a5}")), b"\x1by");
-        assert_eq!(encoded(key::Key::B, key::Mods::ALT, Some("\u{222b}")), b"\x1bb");
+        assert_eq!(
+            encoded(key::Key::Y, key::Mods::ALT, Some("\u{a5}")),
+            b"\x1by"
+        );
+        assert_eq!(
+            encoded(key::Key::B, key::Mods::ALT, Some("\u{222b}")),
+            b"\x1bb"
+        );
     }
 
     #[test]
@@ -1578,7 +1603,10 @@ mod tests {
         let bytes = encoded_with(key::Key::Tab, key::Mods::SHIFT, None, b"\x1b[>1u");
 
         let text = String::from_utf8_lossy(&bytes).to_string();
-        assert!(text.contains(";2"), "shift should still be reported: {text:?}");
+        assert!(
+            text.contains(";2"),
+            "shift should still be reported: {text:?}"
+        );
     }
 
     #[test]
@@ -1834,7 +1862,10 @@ mod tests {
             .terminal
             .emulator
             .scroll_viewport(ScrollViewport::Delta(-100));
-        let shown = clicking.terminal.visible_text().expect("expected the screen");
+        let shown = clicking
+            .terminal
+            .visible_text()
+            .expect("expected the screen");
         assert!(
             !shown.contains("line 199"),
             "the view should have been scrolled up into the scrollback, showed {shown:?}"
@@ -1842,7 +1873,10 @@ mod tests {
 
         clicking.frame(typed(egui::Key::A, "a"));
 
-        let shown = clicking.terminal.visible_text().expect("expected the screen");
+        let shown = clicking
+            .terminal
+            .visible_text()
+            .expect("expected the screen");
         assert!(
             shown.contains("line 199"),
             "typing should have brought the bottom back into view, showed {shown:?}"

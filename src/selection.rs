@@ -10,8 +10,7 @@ use std::time::Duration;
 use crate::{Error, Result};
 
 use libghostty_vt::{
-    Terminal,
-    paste,
+    Terminal, paste,
     selection::{
         FormatOptions,
         gesture::{DragEvent, Geometry, Gesture, PressEvent, ReleaseEvent},
@@ -319,7 +318,12 @@ mod tests {
 
         let mut pointer = Pointer::new().expect("expected a gesture");
         pointer
-            .press(&terminal, cell(2, 0), at(cell(2, 0), 0.5), Duration::from_secs(2))
+            .press(
+                &terminal,
+                cell(2, 0),
+                at(cell(2, 0), 0.5),
+                Duration::from_secs(2),
+            )
             .expect("expected the press to land");
         assert!(!pointer.dragged(&terminal), "the pointer never moved");
         pointer.release(&terminal).expect("expected the release");
@@ -345,7 +349,10 @@ mod tests {
         assert_eq!(selected_text(&terminal).as_deref(), Some("hello"));
 
         let later = Duration::from_secs(3);
-        assert!(pointer.can_extend(&terminal, later), "the gesture kept its anchor");
+        assert!(
+            pointer.can_extend(&terminal, later),
+            "the gesture kept its anchor"
+        );
         pointer
             .extend(
                 &terminal,
@@ -355,7 +362,10 @@ mod tests {
                 false,
             )
             .expect("expected the extension to land");
-        assert!(pointer.dragging, "the button is down, so motion keeps extending");
+        assert!(
+            pointer.dragging,
+            "the button is down, so motion keeps extending"
+        );
         pointer.release(&terminal).expect("expected the release");
 
         assert_eq!(selected_text(&terminal).as_deref(), Some("hello world"));
