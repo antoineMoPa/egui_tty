@@ -689,7 +689,7 @@ impl Terminal {
         }
 
         if !encoded.is_empty() {
-            report(self.tty.write(&encoded));
+            report(self.tty.report(&encoded));
         }
     }
 
@@ -844,7 +844,7 @@ impl Terminal {
             );
         }
         if !encoded.is_empty() {
-            report(self.tty.write(&encoded));
+            report(self.tty.report(&encoded));
         }
     }
 
@@ -870,7 +870,8 @@ impl Terminal {
             (false, false) => b"\x1b[B",
         };
         let encoded: Vec<u8> = arrow.repeat(lines.unsigned_abs() as usize);
-        report(self.tty.write(&encoded));
+        // Arrows, but for the wheel: scrolling a pager is not typing at it.
+        report(self.tty.report(&encoded));
     }
 
     /// Encode this frame's key and text events and send them to the program.

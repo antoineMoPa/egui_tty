@@ -95,6 +95,15 @@ pub trait Tty: Send + Sync {
         self.write(bytes)
     }
 
+    /// Report the pointer to the program: where it moved, what it pressed, how it scrolled,
+    /// for a program that asked to track it. Nobody typed these either - a person reading
+    /// the screen with the pointer resting on it has not answered anything - so a handle
+    /// that treats keystrokes as an answer can leave them out. By default they go the same
+    /// way keystrokes do.
+    fn report(&self, bytes: &[u8]) -> Result<()> {
+        self.write(bytes)
+    }
+
     /// Tell the program its window changed size, so its foreground process gets `SIGWINCH`.
     fn resize(&self, cols: u16, rows: u16) -> Result<()>;
 
