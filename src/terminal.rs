@@ -131,6 +131,10 @@ pub struct Terminal {
     /// scheme is these, put back explicitly — asking the emulator to reset to its own
     /// defaults does not restore them.
     emulator_colors: Option<colors::Scheme>,
+    /// What an input method is composing and has not committed yet - macOS dictation's words
+    /// so far. The program is sent none of it until the commit; it is drawn at the cursor
+    /// meanwhile, so the person sees what is being heard.
+    composing: String,
 }
 
 impl Terminal {
@@ -191,6 +195,7 @@ impl Terminal {
             pressed_link: None,
             colored_for: None,
             emulator_colors: None,
+            composing: String::new(),
         })
     }
 
@@ -461,6 +466,10 @@ impl Terminal {
             // Only the terminal with the keyboard: a copy chord meant for one must not be
             // answered by every other terminal open beside it.
             self.handle_clipboard(ui);
+        } else {
+            // A composition belongs to the terminal with the keyboard, which this one no
+            // longer is.
+            self.composing.clear();
         }
         let origin = response.rect.min + vec2(padding, padding);
         self.handle_scroll(ui, &response, origin, cell);
@@ -938,9 +947,24 @@ impl Terminal {
             report(self.encode_key(vt, mods, text, *repeat, &mut encoded));
         }
 
-        // Anything left is text with no key event behind it: an IME commit, or a paste.
+        // Anything left is text with no key event behind it, a paste say.
         for text in pending_text.drain(text_index.min(pending_text.len())..) {
             encoded.extend_from_slice(text.as_bytes());
+        }
+        // What an input method composed, which it hands over whole once it is done: macOS
+        // dictation writes what it has heard so far as a composition and commits it at the end.
+        // Until then the composition is only drawn - the program sees the committed text.
+        for event in &events {
+            match event {
+                egui::Event::Ime(egui::ImeEvent::Preedit { text, .. }) => {
+                    self.composing.clone_from(text);
+                }
+                egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
+                    self.composing.clear();
+                    encoded.extend_from_slice(text.as_bytes());
+                }
+                _ => {}
+            }
         }
 
         if !encoded.is_empty() {
@@ -1031,6 +1055,8 @@ impl Terminal {
             cell_iterator,
             blink_clock,
             hovered_link,
+            composing,
+            cols,
             ..
         } = self;
         // Read before the fields below are borrowed, so the cursor's phase does not depend
@@ -1189,8 +1215,65 @@ impl Terminal {
             }
         }
 
+        if !composing.is_empty()
+            && let Ok(Some(viewport)) = snapshot.cursor_viewport()
+        {
+            draw_composition(
+                painter,
+                composing,
+                origin,
+                cell,
+                (viewport.x, viewport.y),
+                *cols,
+                style,
+                default_fg,
+                default_bg,
+            );
+        }
+
         let _ = snapshot.set_dirty(Dirty::Clean);
         Ok(blinking)
+    }
+}
+
+/// An input method's composition, from the cursor on and wrapping at the grid's right edge a
+/// cell at a time the way the text will once the program echoes it, drawn over the cells it
+/// covers and underlined the way a composition is everywhere on macOS.
+#[allow(clippy::too_many_arguments)]
+fn draw_composition(
+    painter: &egui::Painter,
+    composing: &str,
+    origin: egui::Pos2,
+    cell: egui::Vec2,
+    cursor: (u16, u16),
+    cols: u16,
+    style: &TerminalStyle,
+    ink: Color32,
+    background: Color32,
+) {
+    let chars: Vec<char> = composing.chars().collect();
+    let cols = usize::from(cols);
+    let (mut col, mut row) = (usize::from(cursor.0), usize::from(cursor.1));
+    let mut rest = chars.as_slice();
+    while !rest.is_empty() {
+        let (line, after) = rest.split_at(rest.len().min(cols.saturating_sub(col).max(1)));
+        let at = egui::pos2(
+            origin.x + col as f32 * cell.x,
+            origin.y + row as f32 * cell.y,
+        );
+        let covered = Rect::from_min_size(at, vec2(line.len() as f32 * cell.x, cell.y));
+        painter.rect_filled(covered, CornerRadius::ZERO, background);
+        painter.text(
+            at,
+            Align2::LEFT_TOP,
+            line.iter().collect::<String>(),
+            style.font.clone(),
+            ink,
+        );
+        painter.hline(covered.x_range(), covered.max.y - 1.0, Stroke::new(1.0, ink));
+        rest = after;
+        col = 0;
+        row += 1;
     }
 }
 
@@ -1621,6 +1704,8 @@ mod tests {
         /// The write end of the program's output, held so the terminal does not report the
         /// program as gone mid-test.
         _writer: mpsc::Sender<Vec<u8>>,
+        /// Everything the terminal sent to the program.
+        sent: Arc<Recorder>,
         ctx: egui::Context,
         terminal: Terminal,
         style: TerminalStyle,
@@ -1634,9 +1719,10 @@ mod tests {
     impl Clicking {
         fn at(shown: &str) -> Self {
             let (writer, output) = mpsc::channel();
+            let sent = Arc::new(Recorder::default());
             let terminal = Terminal::new(TtyStream {
                 output,
-                tty: Arc::new(Recorder::default()) as Arc<dyn Tty>,
+                tty: sent.clone() as Arc<dyn Tty>,
             })
             .expect("expected a terminal");
             writer
@@ -1644,6 +1730,7 @@ mod tests {
                 .expect("expected a listener");
             let mut clicking = Self {
                 _writer: writer,
+                sent,
                 ctx: egui::Context::default(),
                 terminal,
                 style: TerminalStyle::default(),
@@ -1881,6 +1968,36 @@ mod tests {
         assert!(
             shown.contains("line 199"),
             "typing should have brought the bottom back into view, showed {shown:?}"
+        );
+    }
+
+    /// macOS dictation composes what it has heard so far and commits it once it is done, with
+    /// no key pressed: the composition is only shown, and the committed text is what the
+    /// program is sent.
+    #[test]
+    fn a_composition_is_shown_and_its_commit_sent_to_the_program() {
+        let mut clicking = Clicking::at("$ ");
+        let here = clicking.over(0, 0);
+        clicking.frame(vec![moved_to(here), button(here, true)]);
+        clicking.frame(vec![button(here, false)]);
+
+        clicking.frame(vec![egui::Event::Ime(egui::ImeEvent::Preedit {
+            text: "hello wor".to_string(),
+            active_range_chars: None,
+        })]);
+        assert_eq!(clicking.terminal.composing, "hello wor");
+        assert!(
+            clicking.sent.0.lock().unwrap().is_empty(),
+            "a composition should not reach the program before it is committed"
+        );
+
+        clicking.frame(vec![egui::Event::Ime(egui::ImeEvent::Commit(
+            "hello world".to_string(),
+        ))]);
+        assert_eq!(clicking.terminal.composing, "");
+        assert_eq!(
+            String::from_utf8_lossy(&clicking.sent.0.lock().unwrap()),
+            "hello world"
         );
     }
 }
