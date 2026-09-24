@@ -97,6 +97,7 @@ pub struct Terminal {
     label: Option<String>,
     poll_interval: Duration,
     /// Whether the output channel wakes the UI itself yet — see `wake_on_output`.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     wakes_on_output: bool,
     /// Set once the program is gone, so the widget says so instead of looking merely idle.
     exited: bool,
@@ -394,6 +395,15 @@ impl Terminal {
     }
 
     /// Wake the UI the moment the program writes, instead of on the widget's next poll tick.
+    ///
+    /// A browser has no thread to wait on the channel with, so there the widget is woken by its
+    /// poll tick alone - see [`with_poll_interval`](Terminal::with_poll_interval) - and output
+    /// shows within one tick of arriving.
+    #[cfg(target_arch = "wasm32")]
+    fn wake_on_output(&mut self, _ctx: &egui::Context) {}
+
+    /// Wake the UI the moment the program writes, instead of on the widget's next poll tick.
+    #[cfg(not(target_arch = "wasm32"))]
     fn wake_on_output(&mut self, ctx: &egui::Context) {
         if self.wakes_on_output {
             return;
