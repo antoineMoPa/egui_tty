@@ -473,6 +473,7 @@ impl Terminal {
                 )
             });
             self.handle_input(ui);
+            ask_for_a_keyboard(ui, &response, cell);
             // Only the terminal with the keyboard: a copy chord meant for one must not be
             // answered by every other terminal open beside it.
             self.handle_clipboard(ui);
@@ -482,8 +483,16 @@ impl Terminal {
             self.composing.clear();
         }
         let origin = response.rect.min + vec2(padding, padding);
+        // A finger has no wheel, so on a touch screen a finger carried up or down the terminal
+        // is the scroll - and not a selection, which is what the same drag is with a mouse.
+        let touch = ui.input(|input| input.has_touch_screen());
+        if touch && response.dragged() {
+            ui.input_mut(|input| input.smooth_scroll_delta.y += input.pointer.delta().y);
+        }
         self.handle_scroll(ui, &response, origin, cell);
-        self.handle_pointer(ui, &response, origin, cell);
+        if !touch {
+            self.handle_pointer(ui, &response, origin, cell);
+        }
 
         self.blink_clock += ui.input(|input| input.stable_dt).min(0.1);
         let cursor_blinking = match self.draw(&painter, origin, cell, style, focused) {
@@ -953,6 +962,15 @@ impl Terminal {
                 }
                 text
             };
+            // A key that types a character, with no character beside it: a browser's on-screen
+            // keyboard hands the key and the text it typed over in separate frames. The text
+            // is sent when it comes; encoding the bare key as well would type it twice.
+            if text.is_none()
+                && !mods.intersects(key::Mods::CTRL | key::Mods::ALT | key::Mods::SUPER)
+                && keys::unshifted_codepoint(vt).is_some()
+            {
+                continue;
+            }
 
             report(self.encode_key(vt, mods, text, *repeat, &mut encoded));
         }
@@ -972,6 +990,12 @@ impl Terminal {
                 egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
                     self.composing.clear();
                     encoded.extend_from_slice(text.as_bytes());
+                }
+                // An on-screen keyboard taking back what it typed: Android's backspace, and a
+                // word it corrects, which it deletes before typing it again. The program has
+                // been sent those characters already, so it is sent a backspace for each.
+                egui::Event::Ime(egui::ImeEvent::DeleteSurrounding { before_chars, .. }) => {
+                    encoded.extend(std::iter::repeat_n(BACKSPACE, *before_chars));
                 }
                 _ => {}
             }
@@ -1328,6 +1352,32 @@ const MOUSE_PIXEL_SCALE: f32 = 256.0;
 /// How many lines one wheel button press stands for, to a program that reads the mouse:
 /// xterm's three, which is what such a program scrolls itself by per press it hears.
 const LINES_PER_WHEEL_PRESS: f32 = 3.0;
+
+/// What the backspace key sends: DEL, which is what a terminal's erase character is set to.
+const BACKSPACE: u8 = 0x7f;
+
+/// Tell the platform this terminal takes text, on a touch screen - which is what brings its
+/// on-screen keyboard up. In a browser that is eframe's text agent being focused, and the
+/// keyboard stays up for as long as the terminal has the keyboard.
+///
+/// Only on a touch screen: a desktop's keys arrive without it, and a text field being said to
+/// have the keyboard turns the platform's input method on, which then reads the keys its own way.
+fn ask_for_a_keyboard(ui: &Ui, response: &Response, cell: egui::Vec2) {
+    if !ui.input(|input| input.has_touch_screen()) {
+        return;
+    }
+    // Where the text agent stands, which a browser scrolls into view above its keyboard: the
+    // bottom line, where a prompt is.
+    let cursor_rect = Rect::from_min_size(response.rect.left_bottom() - vec2(0.0, cell.y), cell);
+    ui.output_mut(|output| {
+        output.ime = Some(egui::output::IMEOutput {
+            purpose: egui::IMEPurpose::Terminal,
+            rect: response.rect,
+            cursor_rect,
+            should_interrupt_composition: false,
+        });
+    });
+}
 
 /// The terminal button an egui pointer button stands for. The extra pair are the
 /// back/forward buttons, which xterm numbers eight and nine.
@@ -1724,6 +1774,9 @@ mod tests {
         /// The widget's clock, in seconds, which is what tells a double-click from two
         /// clicks. Each frame is a sixtieth of a second unless a test waits longer.
         clock: f64,
+        /// Whether the last frame told the platform the terminal takes text, which is what
+        /// brings a touch screen's keyboard up.
+        took_text: bool,
     }
 
     impl Clicking {
@@ -1747,6 +1800,7 @@ mod tests {
                 origin: egui::Pos2::ZERO,
                 cell: vec2(1.0, 1.0),
                 clock: 0.0,
+                took_text: false,
             };
             clicking.frame(Vec::new());
             clicking
@@ -1807,6 +1861,7 @@ mod tests {
                     egui::OutputCommand::OpenUrl(url) => Some(url.url.clone()),
                     _ => None,
                 });
+            self.took_text = output.platform_output.ime.is_some();
             output.drop_without_applying_deltas();
             opened
         }
@@ -2009,5 +2064,118 @@ mod tests {
             String::from_utf8_lossy(&clicking.sent.0.lock().unwrap()),
             "hello world"
         );
+    }
+
+    /// An on-screen keyboard in a browser hands over the key and the letter it typed in
+    /// separate frames: the letter reaches the program once.
+    #[test]
+    fn a_key_and_its_letter_in_separate_frames_type_it_once() {
+        let mut clicking = Clicking::at("$ ");
+        let here = clicking.over(0, 0);
+        clicking.frame(vec![moved_to(here), button(here, true)]);
+        clicking.frame(vec![button(here, false)]);
+
+        clicking.frame(vec![egui::Event::Key {
+            key: egui::Key::A,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        clicking.frame(vec![egui::Event::Text("a".to_string())]);
+        assert_eq!(*clicking.sent.0.lock().unwrap(), b"a");
+    }
+
+    /// A finger on the screen, as the platform reports it beside the press it stands for.
+    fn touch(at: egui::Pos2, phase: egui::TouchPhase) -> egui::Event {
+        egui::Event::Touch {
+            device_id: egui::TouchDeviceId(0),
+            id: egui::TouchId(0),
+            phase,
+            pos: at,
+            force: None,
+        }
+    }
+
+    /// A touch screen has no keyboard until a text field asks for one, so a terminal tapped
+    /// into asks - and a terminal clicked into with a mouse does not, where the keys arrive
+    /// without it.
+    #[test]
+    fn a_terminal_tapped_into_asks_for_the_on_screen_keyboard() {
+        let mut clicked = Clicking::at("$ ");
+        let here = clicked.over(0, 0);
+        clicked.frame(vec![moved_to(here), button(here, true)]);
+        clicked.frame(vec![button(here, false)]);
+        assert!(
+            !clicked.took_text,
+            "a terminal clicked with a mouse should not ask for a keyboard"
+        );
+
+        let mut tapped = Clicking::at("$ ");
+        let here = tapped.over(0, 0);
+        tapped.frame(vec![
+            touch(here, egui::TouchPhase::Start),
+            moved_to(here),
+            button(here, true),
+        ]);
+        tapped.frame(vec![
+            touch(here, egui::TouchPhase::End),
+            button(here, false),
+        ]);
+        assert!(
+            tapped.took_text,
+            "a terminal tapped on a touch screen should ask for its keyboard"
+        );
+    }
+
+    /// A finger carried down the terminal scrolls back into what went past, the way a wheel
+    /// does, rather than selecting the lines it crosses.
+    #[test]
+    fn a_finger_carried_down_the_terminal_scrolls_rather_than_selects() {
+        let lines: String = (0..200).map(|at| format!("line {at}\r\n")).collect();
+        let mut clicking = Clicking::at(&lines);
+        let from = clicking.over(2, 2);
+        let to = clicking.over(2, 20);
+        let touch_and_button = |at, phase, pressed: Option<bool>| {
+            let mut events = vec![touch(at, phase), moved_to(at)];
+            events.extend(pressed.map(|pressed| button(at, pressed)));
+            events
+        };
+        clicking.frame(touch_and_button(from, egui::TouchPhase::Start, Some(true)));
+        for step in 1..=6 {
+            let at = from + (to - from) * (step as f32 / 6.0);
+            clicking.frame(touch_and_button(at, egui::TouchPhase::Move, None));
+        }
+        clicking.frame(touch_and_button(to, egui::TouchPhase::End, Some(false)));
+
+        assert_eq!(
+            clicking.terminal.selected_text(),
+            None,
+            "nothing was selected"
+        );
+        let shown = clicking
+            .terminal
+            .visible_text()
+            .expect("expected the screen");
+        assert!(
+            !shown.contains("line 199"),
+            "the terminal should have scrolled back from the bottom, showed {shown:?}"
+        );
+    }
+
+    /// Android's keyboard sends no backspace key: it takes back what it typed, which the
+    /// program has already been sent, so the program is sent a backspace for each character.
+    #[test]
+    fn an_on_screen_keyboard_taking_back_what_it_typed_is_backspaces() {
+        let mut clicking = Clicking::at("$ ");
+        let here = clicking.over(0, 0);
+        clicking.frame(vec![moved_to(here), button(here, true)]);
+        clicking.frame(vec![button(here, false)]);
+
+        clicking.frame(vec![egui::Event::Ime(egui::ImeEvent::DeleteSurrounding {
+            before_chars: 2,
+            after_chars: 0,
+        })]);
+        assert_eq!(*clicking.sent.0.lock().unwrap(), b"\x7f\x7f");
     }
 }
