@@ -220,6 +220,11 @@ impl Terminal {
         self.pending_focus = true;
     }
 
+    /// A persistent failure of this terminal's connection, if it needs reconnecting.
+    pub fn connection_error(&self) -> Option<String> {
+        self.tty.connection_error()
+    }
+
     /// Whether the program behind this terminal has ended.
     pub fn has_exited(&self) -> bool {
         self.exited

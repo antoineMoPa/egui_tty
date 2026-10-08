@@ -107,6 +107,11 @@ pub trait Tty: Send + Sync {
     /// Tell the program its window changed size, so its foreground process gets `SIGWINCH`.
     fn resize(&self, cols: u16, rows: u16) -> Result<()>;
 
+    /// A persistent connection failure to show without discarding the emulator.
+    fn connection_error(&self) -> Option<String> {
+        None
+    }
+
     /// Whether the program behind this handle has ended.
     ///
     /// A terminal notices an ended program on its own when the output channel closes. Override
