@@ -948,6 +948,12 @@ impl Terminal {
             if !pressed {
                 continue;
             }
+            // Escape with something selected only clears the selection, and is not sent on.
+            // With nothing selected it goes to the program, as vim and the rest expect.
+            if vt == key::Key::Escape && selection::has_selection(&self.emulator) {
+                report(selection::clear(&self.emulator));
+                continue;
+            }
 
             let mods = keys::vt_mods(*modifiers);
             if !self.reads_the_real_chord()
@@ -1973,6 +1979,43 @@ mod tests {
         clicking.frame(vec![button(further, false)]);
 
         assert_eq!(selection::selected_text(&clicking.terminal.emulator), None);
+    }
+
+    /// Escape clears a selection and is kept from the program; once nothing is selected it is
+    /// sent on as usual, which is what vim and the rest of the terminal programs rely on.
+    #[test]
+    fn escape_clears_a_selection_then_reaches_the_program() {
+        let mut clicking = Clicking::at("hello world again");
+        let from = clicking.over(0, 0);
+        let to = clicking.over(4, 0);
+        clicking.frame(vec![moved_to(from), button(from, true)]);
+        clicking.frame(vec![moved_to(to)]);
+        clicking.frame(vec![button(to, false)]);
+        assert_eq!(
+            selection::selected_text(&clicking.terminal.emulator).as_deref(),
+            Some("hello")
+        );
+
+        let escape = vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }];
+        clicking.frame(escape.clone());
+        assert_eq!(selection::selected_text(&clicking.terminal.emulator), None);
+        assert!(
+            clicking.sent.0.lock().unwrap().is_empty(),
+            "the escape that cleared the selection was not sent on"
+        );
+
+        clicking.frame(escape);
+        assert_eq!(
+            clicking.sent.0.lock().unwrap().as_slice(),
+            b"\x1b",
+            "with nothing selected, escape goes to the program"
+        );
     }
 
     /// A drag over the same URL is a selection, and selecting text must not open anything.

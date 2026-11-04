@@ -187,6 +187,21 @@ pub(crate) fn selected_text(terminal: &Terminal<'_, '_>) -> Option<String> {
     String::from_utf8(bytes.to_vec()).ok()
 }
 
+/// Whether anything is selected. Ghostty's formatter answers `None` when there is no
+/// selection, which is the only way the terminal reports one.
+pub(crate) fn has_selection(terminal: &Terminal<'_, '_>) -> bool {
+    let options = FormatOptions::new();
+    matches!(terminal.format_selection_alloc(None, options), Ok(Some(_)))
+}
+
+/// Drop the selection, if there is one. The gesture machine is left as it is.
+pub(crate) fn clear(terminal: &Terminal<'_, '_>) -> Result<()> {
+    terminal
+        .set_selection(None)
+        .map(|_| ())
+        .map_err(|error| Error::context("failed to clear the selection", error))
+}
+
 /// Encode pasted text the way the running program expects it: wrapped in bracketed-paste
 /// markers when it asked for them, and with the control bytes that could inject a command
 /// stripped either way.
