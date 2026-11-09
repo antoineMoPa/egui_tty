@@ -20,38 +20,131 @@ const SCHEMES: &[&str] = &["https://", "http://", "file://", "ftp://"];
 /// the full stop, and one inside brackets should not swallow the closing bracket.
 const GIVEN_BACK: &[char] = &['.', ',', ';', ':', '!', '?', ')', ']', '}', '>', '\'', '"'];
 
-/// A URL on the grid: which cells of which row it covers, and where it points.
+/// A URL on the grid: the cells it covers, row by row, and where it points.
+///
+/// A URL longer than the terminal is wide gets soft-wrapped onto the rows below, so one link
+/// can cover the tail of one row and the head of the next.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Link {
+    pub(crate) segments: Vec<Segment>,
+    pub(crate) url: String,
+}
+
+/// The run of a link's cells on one row of the viewport.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct Segment {
     pub(crate) row: u16,
     pub(crate) columns: Range<u16>,
-    pub(crate) url: String,
+}
+
+impl Link {
+    /// The columns the link covers on a row, if it reaches that row at all.
+    pub(crate) fn columns_on(&self, row: u16) -> Option<Range<u16>> {
+        self.segments
+            .iter()
+            .find(|segment| segment.row == row)
+            .map(|segment| segment.columns.clone())
+    }
 }
 
 /// The link covering a cell of the viewport, if there is one.
 pub(crate) fn link_at(terminal: &Terminal<'_, '_>, cols: u16, x: u16, y: u16) -> Option<Link> {
-    if x >= cols {
+    if x >= cols || cols == 0 {
         return None;
     }
-    marked_link_at(terminal, cols, x, y).or_else(|| printed_link_at(terminal, cols, x, y))
+    let line = Line::around(terminal, cols, y);
+    let at = line.index_of(x, y);
+    marked_link_at(terminal, &line, at).or_else(|| printed_link_at(terminal, &line, at))
+}
+
+/// The rows the program wrote as one line: the row under the pointer plus every row the
+/// terminal soft-wrapped it onto, or from. A position along it is `row * cols + column`,
+/// counted from its first row.
+struct Line {
+    first_row: u16,
+    rows: u16,
+    cols: u16,
+}
+
+impl Line {
+    fn around(terminal: &Terminal<'_, '_>, cols: u16, y: u16) -> Self {
+        let screen_rows = terminal.rows().unwrap_or(y + 1).max(y + 1);
+        let mut first_row = y;
+        while first_row > 0 && is_wrapped(terminal, first_row - 1) {
+            first_row -= 1;
+        }
+        let mut last_row = y;
+        while last_row + 1 < screen_rows && is_wrapped(terminal, last_row) {
+            last_row += 1;
+        }
+        Self {
+            first_row,
+            rows: last_row - first_row + 1,
+            cols,
+        }
+    }
+
+    fn len(&self) -> usize {
+        usize::from(self.rows) * usize::from(self.cols)
+    }
+
+    fn index_of(&self, x: u16, y: u16) -> usize {
+        usize::from(y - self.first_row) * usize::from(self.cols) + usize::from(x)
+    }
+
+    fn cell_of(&self, index: usize) -> (u16, u16) {
+        let cols = usize::from(self.cols);
+        ((index % cols) as u16, self.first_row + (index / cols) as u16)
+    }
+
+    /// A span along the line, cut at the row ends into the cells it covers on each row.
+    fn segments(&self, span: Range<usize>) -> Vec<Segment> {
+        let cols = usize::from(self.cols);
+        let mut segments = Vec::new();
+        let mut from = span.start;
+        while from < span.end {
+            let row_end = (from / cols + 1) * cols;
+            let to = span.end.min(row_end);
+            let (x, row) = self.cell_of(from);
+            segments.push(Segment {
+                row,
+                columns: x..x + (to - from) as u16,
+            });
+            from = to;
+        }
+        segments
+    }
+}
+
+/// Whether the terminal carried this viewport row on to the next one, rather than the
+/// program ending the line there.
+fn is_wrapped(terminal: &Terminal<'_, '_>, y: u16) -> bool {
+    terminal
+        .grid_ref(Point::Viewport(PointCoordinate { x: 0, y: u32::from(y) }))
+        .and_then(|grid_ref| grid_ref.row())
+        .and_then(|row| row.is_wrapped())
+        .unwrap_or(false)
 }
 
 /// A link the program marked with OSC 8. Its extent is however far the same URI runs.
-fn marked_link_at(terminal: &Terminal<'_, '_>, cols: u16, x: u16, y: u16) -> Option<Link> {
-    let url = hyperlink_uri(terminal, x, y)?;
+fn marked_link_at(terminal: &Terminal<'_, '_>, line: &Line, at: usize) -> Option<Link> {
+    let uri_at = |index: usize| {
+        let (x, y) = line.cell_of(index);
+        hyperlink_uri(terminal, x, y)
+    };
+    let url = uri_at(at)?;
 
-    let mut start = x;
-    while start > 0 && hyperlink_uri(terminal, start - 1, y).as_deref() == Some(url.as_str()) {
+    let mut start = at;
+    while start > 0 && uri_at(start - 1).as_deref() == Some(url.as_str()) {
         start -= 1;
     }
-    let mut end = x + 1;
-    while end < cols && hyperlink_uri(terminal, end, y).as_deref() == Some(url.as_str()) {
+    let mut end = at + 1;
+    while end < line.len() && uri_at(end).as_deref() == Some(url.as_str()) {
         end += 1;
     }
 
     Some(Link {
-        row: y,
-        columns: start..end,
+        segments: line.segments(start..end),
         url,
     })
 }
@@ -69,27 +162,27 @@ fn hyperlink_uri(terminal: &Terminal<'_, '_>, x: u16, y: u16) -> Option<String> 
     String::from_utf8(buffer[..written].to_vec()).ok()
 }
 
-/// A URL the program simply printed, found by reading the row back as text.
-fn printed_link_at(terminal: &Terminal<'_, '_>, cols: u16, x: u16, y: u16) -> Option<Link> {
-    let row = row_text(terminal, cols, y);
-    let found = find_url(&row, usize::from(x))?;
+/// A URL the program simply printed, found by reading the line back as text.
+fn printed_link_at(terminal: &Terminal<'_, '_>, line: &Line, at: usize) -> Option<Link> {
+    let text = line_text(terminal, line);
+    let found = find_url(&text, at)?;
 
     Some(Link {
-        row: y,
-        columns: found.start as u16..found.end as u16,
-        url: row[found].iter().collect(),
+        url: text[found.clone()].iter().collect(),
+        segments: line.segments(found),
     })
 }
 
-/// One row as one char per cell, so a column of the grid is an index of the row.
+/// The line as one char per cell, so a position along the line is an index of the text.
 ///
 /// A cell holding a grapheme cluster contributes only its first character. That keeps the
 /// indexing honest, and a URL is made of characters that stand alone anyway.
-fn row_text(terminal: &Terminal<'_, '_>, cols: u16, y: u16) -> Vec<char> {
-    let mut out = Vec::with_capacity(usize::from(cols));
+fn line_text(terminal: &Terminal<'_, '_>, line: &Line) -> Vec<char> {
+    let mut out = Vec::with_capacity(line.len());
     let mut graphemes = [' '; 8];
 
-    for x in 0..cols {
+    for index in 0..line.len() {
+        let (x, y) = line.cell_of(index);
         let character = terminal
             .grid_ref(Point::Viewport(PointCoordinate { x, y: u32::from(y) }))
             .ok()
@@ -163,8 +256,7 @@ mod tests {
 
         let link = link_at(&terminal, 60, 10, 0).expect("expected a link");
         assert_eq!(link.url, "https://example.com/docs");
-        assert_eq!(link.row, 0);
-        assert_eq!(link.columns, 6..30);
+        assert_eq!(link.segments, vec![Segment { row: 0, columns: 6..30 }]);
 
         assert!(link_at(&terminal, 60, 2, 0).is_none(), "before the url");
         assert!(link_at(&terminal, 60, 40, 0).is_none(), "after it");
@@ -182,11 +274,66 @@ mod tests {
         let link = link_at(&terminal, 60, 6, 0).expect("expected a link");
         assert_eq!(link.url, "https://example.com/deep");
         assert_eq!(
-            link.columns,
-            4..14,
+            link.columns_on(0),
+            Some(4..14),
             "the link covers exactly the cells between the escapes"
         );
         assert!(link_at(&terminal, 60, 1, 0).is_none(), "outside the escape");
+    }
+
+    fn narrow_terminal_showing(text: &str) -> Terminal<'static, 'static> {
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols: 20,
+            rows: 4,
+            max_scrollback: 100,
+        })
+        .expect("expected a terminal");
+        terminal.vt_write(text.as_bytes());
+        terminal
+    }
+
+    /// A URL longer than the row is wide wraps onto the next rows, and is still one link
+    /// from whichever of its rows the pointer is on.
+    #[test]
+    fn a_url_the_terminal_wrapped_is_one_link_across_its_rows() {
+        let url = "https://example.com/a/very/long/path/x";
+        let terminal = narrow_terminal_showing(&format!("see {url} ok"));
+
+        for (x, y) in [(6, 0), (3, 1), (1, 2)] {
+            let link = link_at(&terminal, 20, x, y).expect("expected a link");
+            assert_eq!(link.url, url, "from {x},{y}");
+            assert_eq!(
+                link.segments,
+                vec![
+                    Segment { row: 0, columns: 4..20 },
+                    Segment { row: 1, columns: 0..20 },
+                    Segment { row: 2, columns: 0..2 },
+                ]
+            );
+        }
+        assert!(link_at(&terminal, 20, 4, 2).is_none(), "the word after it");
+    }
+
+    #[test]
+    fn an_osc_8_link_the_terminal_wrapped_covers_every_row() {
+        let terminal = narrow_terminal_showing(
+            "0123456789\x1b]8;;https://example.com/deep\x1b\\a label that wraps\x1b]8;;\x1b\\ ok",
+        );
+
+        let link = link_at(&terminal, 20, 2, 1).expect("expected a link");
+        assert_eq!(link.url, "https://example.com/deep");
+        assert_eq!(link.columns_on(0), Some(10..20));
+        assert_eq!(link.columns_on(1), Some(0..8));
+    }
+
+    /// A program that ends its own line does not make one link of two rows.
+    #[test]
+    fn rows_the_program_ended_itself_are_not_joined() {
+        let terminal = narrow_terminal_showing("https://example.com/\r\nmore-text");
+
+        let link = link_at(&terminal, 20, 3, 0).expect("expected a link");
+        assert_eq!(link.url, "https://example.com/");
+        assert!(link_at(&terminal, 20, 3, 1).is_none());
     }
 
     #[test]

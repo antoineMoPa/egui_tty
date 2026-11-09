@@ -46,11 +46,11 @@ impl Terminal {
         let mut row_index: u16 = 0;
 
         while let Some(row) = rows.next() {
-            // The link, if any, is on one row: the cells of every other row skip the check.
+            // The link, if any, is on a row or a few wrapped ones: the cells of every other
+            // row skip the check.
             let underlined = hovered_link
                 .as_ref()
-                .filter(|link| link.row == row_index)
-                .map(|link| link.columns.clone());
+                .and_then(|link| link.columns_on(row_index));
             let mut column_index: u16 = 0;
 
             let mut cells = cell_iterator
