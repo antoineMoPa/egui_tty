@@ -94,7 +94,10 @@ impl Line {
 
     fn cell_of(&self, index: usize) -> (u16, u16) {
         let cols = usize::from(self.cols);
-        ((index % cols) as u16, self.first_row + (index / cols) as u16)
+        (
+            (index % cols) as u16,
+            self.first_row + (index / cols) as u16,
+        )
     }
 
     /// A span along the line, cut at the row ends into the cells it covers on each row.
@@ -120,7 +123,10 @@ impl Line {
 /// program ending the line there.
 fn is_wrapped(terminal: &Terminal<'_, '_>, y: u16) -> bool {
     terminal
-        .grid_ref(Point::Viewport(PointCoordinate { x: 0, y: u32::from(y) }))
+        .grid_ref(Point::Viewport(PointCoordinate {
+            x: 0,
+            y: u32::from(y),
+        }))
         .and_then(|grid_ref| grid_ref.row())
         .and_then(|row| row.is_wrapped())
         .unwrap_or(false)
@@ -256,7 +262,13 @@ mod tests {
 
         let link = link_at(&terminal, 60, 10, 0).expect("expected a link");
         assert_eq!(link.url, "https://example.com/docs");
-        assert_eq!(link.segments, vec![Segment { row: 0, columns: 6..30 }]);
+        assert_eq!(
+            link.segments,
+            vec![Segment {
+                row: 0,
+                columns: 6..30
+            }]
+        );
 
         assert!(link_at(&terminal, 60, 2, 0).is_none(), "before the url");
         assert!(link_at(&terminal, 60, 40, 0).is_none(), "after it");
@@ -305,9 +317,18 @@ mod tests {
             assert_eq!(
                 link.segments,
                 vec![
-                    Segment { row: 0, columns: 4..20 },
-                    Segment { row: 1, columns: 0..20 },
-                    Segment { row: 2, columns: 0..2 },
+                    Segment {
+                        row: 0,
+                        columns: 4..20
+                    },
+                    Segment {
+                        row: 1,
+                        columns: 0..20
+                    },
+                    Segment {
+                        row: 2,
+                        columns: 0..2
+                    },
                 ]
             );
         }
